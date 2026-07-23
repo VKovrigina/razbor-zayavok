@@ -11,8 +11,8 @@
 
 | ID | Title | Status | Priority | Owner | Started |
 |----|-------|--------|----------|-------|---------|
-| P-003 | Заполнить реальные факты в `docs/faq-knowledge-base.md` (цены/сроки/условия тарифа), перенести в `classify/faq.py` | `BLOCKED` (ждёт пользователя) | P0 | — | 2026-07-23 |
-| P-004 | Получить от пользователя список новых этапов воронки Partners и перестроить `core/state_machine.py`/`db/models.py:Status` | `BLOCKED` (ждёт пользователя) | P0 | — | 2026-07-23 |
+| P-003 | Заполнить реальные факты в `docs/faq-knowledge-base.md` (цены/сроки/условия тарифа) для оставшихся 5 пунктов (`faq_albato_tariff`, `faq_free_estimate`, `faq_can_decline_after_estimate`, `faq_payment_timing`, `faq_multiple_services`), перенести в `classify/faq.py` | `BLOCKED` (ждёт пользователя; 3 из 8 пунктов уже заполнены и включены) | P0 | — | 2026-07-23 |
+| P-005 | Вписать реальный `ANTHROPIC_API_KEY` в `.env` — сейчас пуст, вся классификация/чеклисты работают на грубых фолбэках без LLM (см. `RESEARCH.md`) | `BACKLOG` (пользователь пока не чинит, "анализируй сам сообщения") | P0 | — | 2026-07-23 |
 
 ---
 
@@ -53,6 +53,8 @@
 
 | ID | Title | Done | PR | Artifacts | ADR |
 |----|-------|------|----|-----------| ----|
+| P-006 | Цепочка напоминаний: race-check, guard по реальному этапу CRM, этап «Молчание», FAQ-подбор (3 пункта) без немедленной эскалации | 2026-07-23 | — | `core/state_machine.py`, `db/repository.py`, `amo/actions.py`, `amo/client.py`, `classify/faq.py`, `core/templates.py`, `config.py`, `Логика ИИ агента.md`, `.env` | — |
+| P-004 | Новые этапы CRM (Уточнение ТЗ, Ручная проверка) + примечание с ТЗ при positive-ответе | 2026-07-23 | — | `core/state_machine.py`, `amo/actions.py`, `amo/client.py`, `core/templates.py`, `config.py`, `Логика ИИ агента.md`, `.env` | — |
 | P-002 | Вариации первого сообщения (анти-бан) + FAQ-база (черновик) + чеклист целостности задачи | 2026-07-23 | — | `core/templates.py`, `classify/faq.py`, `core/checklist.py`, `docs/faq-knowledge-base.md`, тесты | — |
 | P-001 | Cutover: перенос `data/` (сессия Telegram, sqlite, логи) из `../ТГ агент` — этот проект теперь единственный источник runtime-состояния | 2026-07-23 | — | `RESEARCH.md` | — |
 | P-000 | Перенос кода из `../ТГ агент` под этот фреймворк | 2026-07-23 | — | `RESEARCH.md`, `AGENTS.md` | — |

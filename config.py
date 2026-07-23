@@ -28,6 +28,9 @@ class Settings:
     amocrm_pipeline_id: int | None = _int("AMOCRM_PIPELINE_ID")
     amocrm_stage_new_contact_id: int | None = _int("AMOCRM_STAGE_NEW_CONTACT_ID")
     amocrm_stage_negotiations_id: int | None = _int("AMOCRM_STAGE_NEGOTIATIONS_ID")
+    amocrm_stage_clarification_id: int | None = _int("AMOCRM_STAGE_CLARIFICATION_ID")
+    amocrm_stage_silence_id: int | None = _int("AMOCRM_STAGE_SILENCE_ID")
+    amocrm_stage_manual_review_id: int | None = _int("AMOCRM_STAGE_MANUAL_REVIEW_ID")
     amocrm_stage_blocked_id: int | None = _int("AMOCRM_STAGE_BLOCKED_ID")
 
     amocrm_field_id_telegram: int | None = _int("AMOCRM_FIELD_ID_TELEGRAM")
@@ -73,6 +76,9 @@ class Settings:
             "amocrm_pipeline_id",
             "amocrm_stage_new_contact_id",
             "amocrm_stage_negotiations_id",
+            "amocrm_stage_clarification_id",
+            "amocrm_stage_silence_id",
+            "amocrm_stage_manual_review_id",
             "amocrm_stage_blocked_id",
             "amocrm_field_id_telegram",
             "amocrm_field_id_stack",

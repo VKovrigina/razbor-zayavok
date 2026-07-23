@@ -17,6 +17,15 @@ from telegram_channel.sender import TelegramSendError
 
 logger = logging.getLogger(__name__)
 
+# Этапы CRM, на которых бот вправе слать напоминания об отсутствии ответа (см.
+# process_scheduler_tick). Если сделку вручную перевели на любой другой этап — напоминания
+# останавливаются (см. `_deal_in_reminder_eligible_stage`).
+_REMINDER_ELIGIBLE_STAGE_IDS = {
+    settings.amocrm_stage_negotiations_id,
+    settings.amocrm_stage_silence_id,
+    settings.amocrm_stage_clarification_id,
+}
+
 
 async def _send_via_channel(deal: Deal, text: str) -> None:
     if deal.channel == Channel.TELEGRAM:
@@ -63,55 +72,107 @@ async def _send_first_contact(deal_id: int, deal: Deal, text: str) -> tuple[Chan
 
 
 async def process_new_deal(deal_id: int) -> None:
-    """Первый контакт по сделке, только что попавшей в 'Новый контакт'. Чеклист целостности
-    задачи (`core/checklist.py`) не блокирует отправку — если сервисов названо меньше двух или
-    задача не описана (ни проблема, ни данные для обработки), в то же самое сообщение перед
-    абзацем согласия на оплату добавляется предупреждение о нехватке данных (см.
-    `core/templates.py: first_message`)."""
+    """Первый контакт по сделке, только что попавшей в 'Новый контакт'. Ни один из чеклистов не
+    блокирует отправку — оба влияют только на текст того же основного сообщения
+    (`core/templates.py: first_message`):
+    - `checklist.assess` — если сервисов названо меньше двух или задача не описана (ни проблема,
+      ни данные для обработки), перед абзацем согласия на оплату добавляется предупреждение;
+    - `checklist.assess_topic` — если по тексту задачи распознана известная тема (ИИ-агент/бот,
+      Tilda+iiko, Яндекс Метрика, бот в Максе) с недостающими деталями, эти вопросы заменяют
+      закрывающий вопрос "Хотите что-то добавить?".
+
+    Сразу после отправки сделка переводится на этап 'Первичные переговоры' — независимо от того,
+    ответит клиент или нет (не дожидаемся ответа, в отличие от предыдущей версии сценария)."""
     deal = repo.get_deal(deal_id)
     if deal is None:
         return
 
     missing = checklist.assess(deal.stack_text, deal.case_text)
-    text = templates.first_message(deal.contact_name, deal.stack_text, deal.case_text, missing)
+    topic_questions = checklist.assess_topic(deal.stack_text, deal.case_text)
+    text = templates.first_message(
+        deal.contact_name, deal.stack_text, deal.case_text, missing, topic_questions
+    )
     sent = await _send_first_contact(deal_id, deal, text)
     if sent is None:
         return
+
+    try:
+        await asyncio.to_thread(amo_actions.move_to_negotiations, deal_id)
+    except Exception:
+        logger.exception("Сделка %s: не удалось перевести на этап 'Первичные переговоры'", deal_id)
 
     channel, peer_id = sent
     next_action_at = timeutils.next_reminder_at_iso()
     repo.set_awaiting_first_sent(deal_id, channel.value, peer_id, next_action_at)
 
 
+def _deal_in_reminder_eligible_stage(deal_id: int) -> bool:
+    status_id = amo_actions.get_lead_status_id(deal_id)
+    return status_id in _REMINDER_ELIGIBLE_STAGE_IDS
+
+
 async def process_scheduler_tick() -> None:
     """Вызывается периодически: рассылает напоминание №1 / закрывающее сообщение тем, у кого
-    подошло время, согласно `next_action_at`."""
+    подошло время, согласно `next_action_at`. Та же цепочка обслуживает и ожидание ответа на
+    первое сообщение (этап 'Первичные переговоры'), и ожидание ответа на уточняющий вопрос бота
+    на этапе 'Уточнение ТЗ' (см. handle_incoming_reply: restart_reminder_cycle) — оба случая
+    неотличимы для шедулера, статус в локальной БД один и тот же."""
     now = timeutils.to_iso(timeutils.utcnow())
-    for deal in repo.list_due_rows(now):
-        if not repo.try_lock(deal.deal_id):
+    for stale in repo.list_due_rows(now):
+        deal_id = stale.deal_id
+        if not repo.try_lock(deal_id):
             continue
         try:
+            # Перечитываем сделку заново после лока: за время между выборкой due-строк и локом
+            # мог прийти ответ клиента (handle_incoming_reply уже мог изменить статус и снять
+            # next_action_at) — не шлём напоминание, если это произошло.
+            deal = repo.get_deal(deal_id)
+            if deal is None:
+                repo.unlock(deal_id)
+                continue
+            if deal.status not in (Status.AWAITING_REPLY_1, Status.AWAITING_REPLY_2):
+                repo.unlock(deal_id)
+                continue
+            if deal.next_action_at is None or deal.next_action_at > now:
+                repo.unlock(deal_id)
+                continue
+
+            if not await asyncio.to_thread(_deal_in_reminder_eligible_stage, deal_id):
+                repo.stop_reminders(deal_id)
+                continue
+
             if deal.status == Status.AWAITING_REPLY_1:
                 await _send_via_channel(deal, templates.REMINDER_1)
-                repo.log_event(deal.deal_id, "out", deal.channel.value, templates.REMINDER_1)
-                repo.advance_to_reminder2(deal.deal_id, timeutils.next_reminder_at_iso())
-            elif deal.status == Status.AWAITING_REPLY_2:
+                repo.log_event(deal_id, "out", deal.channel.value, templates.REMINDER_1)
+                try:
+                    await asyncio.to_thread(amo_actions.move_to_silence, deal_id)
+                except Exception:
+                    logger.exception("Сделка %s: не удалось перевести на этап 'Молчание'", deal_id)
+                repo.advance_to_reminder2(deal_id, timeutils.next_reminder_at_iso())
+            else:  # AWAITING_REPLY_2
                 await _send_via_channel(deal, templates.CLOSING_NO_REPLY)
-                repo.log_event(deal.deal_id, "out", deal.channel.value, templates.CLOSING_NO_REPLY)
-                await asyncio.to_thread(amo_actions.move_to_blocked, deal.deal_id)
-                repo.close_no_reply(deal.deal_id)
-            else:
-                repo.unlock(deal.deal_id)
+                repo.log_event(deal_id, "out", deal.channel.value, templates.CLOSING_NO_REPLY)
+                await asyncio.to_thread(amo_actions.move_to_blocked, deal_id)
+                repo.close_no_reply(deal_id)
         except Exception:
-            logger.exception("Сделка %s: ошибка при обработке due-строки шедулера", deal.deal_id)
+            logger.exception("Сделка %s: ошибка при обработке due-строки шедулера", deal_id)
             retry_at = timeutils.to_iso(timeutils.utcnow() + timedelta(hours=1))
-            repo.reschedule(deal.deal_id, retry_at)
+            repo.reschedule(deal_id, retry_at)
 
 
 async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> None:
     """Входящее сообщение от клиента (Telegram или email). Любой ответ переводит сделку на этап
-    'Первичные переговоры' и классифицируется на positive/negative/ambiguous; после этого бот
-    больше не реагирует на сообщения по этой сделке (см. TERMINAL_ESCALATED_STATUSES)."""
+    'Уточнение ТЗ' и классифицируется на positive/negative/ambiguous.
+
+    Positive/negative, а также ambiguous без совпадения в базе знаний — сразу переводятся на этап
+    'Ручная проверка' и на Варвару ставится задача (после этого бот больше не реагирует на
+    сообщения по этой сделке, см. TERMINAL_ESCALATED_STATUSES). Если ответ positive — перед
+    переводом в сделку добавляется примечание с собранным ТЗ (см. `core/templates.py: spec_note`).
+
+    Ambiguous С совпадением в базе знаний — бот отвечает сам и остаётся ждать реакции клиента
+    (`repo.restart_reminder_cycle`, та же цепочка напоминаний, что после первого сообщения),
+    БЕЗ эскалации на Варвару — до тех пор, пока не придёт содержательный ответ (тогда следующий
+    вызов этой функции классифицирует его как positive/negative) или вопрос без ответа в базе."""
     deal = repo.get_deal(deal_id)
     if deal is None:
         return
@@ -124,9 +185,9 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
     repo.log_event(deal_id, "in", channel.value, text)
 
     try:
-        await asyncio.to_thread(amo_actions.move_to_negotiations, deal_id)
+        await asyncio.to_thread(amo_actions.move_to_clarification, deal_id)
     except Exception:
-        logger.exception("Сделка %s: не удалось перевести на этап 'Первичные переговоры'", deal_id)
+        logger.exception("Сделка %s: не удалось перевести на этап 'Уточнение ТЗ'", deal_id)
 
     try:
         category = await asyncio.to_thread(classify_client.classify_sync, text, deal.case_text)
@@ -150,18 +211,41 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
             logger.exception("Сделка %s: подбор ответа из базы знаний не удался", deal_id)
 
         if faq_id:
-            reply_text = faq_client.get_answer(faq_id)
-            task_text = templates.task_text_faq_answered(faq_id)
-        else:
-            reply_text = templates.REPLY_AMBIGUOUS
-            task_text = templates.TASK_TEXT_CLARIFICATION
+            # Бот сам отвечает на встречный вопрос и ждёт реакции клиента — не эскалирует на
+            # Варвару сразу (см. Логика ИИ агента.md, п.3). Дальше решает следующий ответ клиента:
+            # содержательный ответ по существу → positive → обычная эскалация ниже; ещё один
+            # вопрос с ответом в базе знаний → снова эта же ветка; вопрос без ответа в базе →
+            # ambiguous без совпадения → REPLY_AMBIGUOUS + эскалация ниже.
+            faq_answer = faq_client.get_answer(faq_id)
+            try:
+                await _send_via_channel(deal, faq_answer)
+                repo.log_event(deal_id, "out", deal.channel.value, faq_answer)
+            except Exception:
+                logger.exception("Сделка %s: не удалось отправить ответ из базы знаний", deal_id)
+            repo.restart_reminder_cycle(deal_id, timeutils.next_reminder_at_iso())
+            return
+        reply_text = templates.REPLY_AMBIGUOUS
+        task_text = templates.TASK_TEXT_CLARIFICATION
         new_status = Status.ESCALATED_AMBIGUOUS
+
+    if category == ReplyCategory.POSITIVE:
+        case_with_reply = f"{deal.case_text or ''}\n\nОтвет клиента: {text}".strip()
+        note_text = templates.spec_note(deal.stack_text, case_with_reply)
+        try:
+            await asyncio.to_thread(amo_actions.add_note, deal_id, note_text)
+        except Exception:
+            logger.exception("Сделка %s: не удалось добавить примечание с ТЗ", deal_id)
 
     try:
         await _send_via_channel(deal, reply_text)
         repo.log_event(deal_id, "out", deal.channel.value, reply_text)
     except Exception:
         logger.exception("Сделка %s: не удалось отправить ответ клиенту (%s)", deal_id, category)
+
+    try:
+        await asyncio.to_thread(amo_actions.move_to_manual_review, deal_id)
+    except Exception:
+        logger.exception("Сделка %s: не удалось перевести на этап 'Ручная проверка'", deal_id)
 
     try:
         await asyncio.to_thread(amo_actions.create_manager_task, deal_id, task_text)

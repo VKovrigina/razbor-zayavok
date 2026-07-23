@@ -1,4 +1,4 @@
-from core.templates import FIRST_MESSAGE_VARIANTS, first_message
+from core.templates import DEFAULT_CLOSING_QUESTIONS, FIRST_MESSAGE_VARIANTS, first_message, spec_note
 
 
 def test_first_message_substitutes_placeholders():
@@ -15,21 +15,24 @@ def test_first_message_uses_fallbacks_for_missing_data():
 
 
 def test_first_message_picks_one_of_known_variants():
+    # тело сообщения и закрывающий вопрос варьируются НЕЗАВИСИМО (см. _closing_question) —
+    # полное множество допустимых текстов — все комбинации body × closing_question.
+    all_combinations = {
+        v.format(name="Имя", stack="Стек", case="Кейс", closing_question=cq)
+        for v in FIRST_MESSAGE_VARIANTS
+        for cq in DEFAULT_CLOSING_QUESTIONS
+    }
     seen = set()
     for _ in range(50):
-        text = first_message("Имя", "Стек", "Кейс")
-        seen.add(text)
-    rendered_variants = {
-        v.format(name="Имя", stack="Стек", case="Кейс") for v in FIRST_MESSAGE_VARIANTS
-    }
-    assert seen <= rendered_variants
-    # за 50 попыток при 4+ вариантах случайный выбор почти наверняка даст больше одного текста
+        seen.add(first_message("Имя", "Стек", "Кейс"))
+    assert seen <= all_combinations
+    # за 50 попыток при 4 body × 4 closing_question случайный выбор почти наверняка даст >1 текст
     assert len(seen) > 1
 
 
 def test_every_variant_has_required_compliance_and_disclaimer_text():
     for variant in FIRST_MESSAGE_VARIANTS:
-        rendered = variant.format(name="Имя", stack="Стек", case="Кейс")
+        rendered = variant.format(name="Имя", stack="Стек", case="Кейс", closing_question="X")
         assert "интегратор" in rendered.lower()
         assert "альбато" in rendered.lower()
         assert "ии-помощник" in rendered.lower()
@@ -54,3 +57,26 @@ def test_warning_mentions_only_missing_field():
     text = first_message("Иван", "amoCRM", "Синхронизировать лиды из форм сайта в CRM", ["stack"])
     assert "минимум два сервиса" in text
     assert "ни данные, которые нужно обработать" not in text
+
+
+def test_no_topic_questions_uses_default_closing_question():
+    text = first_message("Иван", "amoCRM + Sheets", "Синхронизация лидов", [], [])
+    assert any(cq in text for cq in DEFAULT_CLOSING_QUESTIONS)
+
+
+def test_topic_questions_replace_default_closing_question():
+    topic_questions = ["для кого предназначен ИИ-агент/чат-бот", "какой результат нужен"]
+    text = first_message("Иван", "amoCRM", "ИИ-агент для поддержки", [], topic_questions)
+    assert "для кого предназначен ИИ-агент/чат-бот" in text
+    assert "какой результат нужен" in text
+    assert not any(cq in text for cq in DEFAULT_CLOSING_QUESTIONS)
+
+
+def test_spec_note_formats_stack_and_case():
+    note = spec_note("amoCRM + Sheets", "Синхронизировать лиды")
+    assert note == "🔸Сервисы: amoCRM + Sheets\n🔸Задача: Синхронизировать лиды"
+
+
+def test_spec_note_uses_dash_fallback_for_missing_fields():
+    note = spec_note(None, None)
+    assert note == "🔸Сервисы: —\n🔸Задача: —"

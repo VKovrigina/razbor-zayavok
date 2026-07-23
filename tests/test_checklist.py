@@ -50,3 +50,57 @@ def test_case_detailed_passes_without_llm_fallback(monkeypatch):
 def test_both_fields_missing(monkeypatch):
     _no_llm(monkeypatch)
     assert checklist.assess(None, None) == ["stack", "case"]
+
+
+# --- assess_topic (тематические чек-листы, keyword-фолбэк без LLM) ---
+
+def test_topic_none_when_no_keywords_match(monkeypatch):
+    _no_llm(monkeypatch)
+    assert checklist.assess_topic("amoCRM + Sheets", "Синхронизировать лиды") == []
+
+
+def test_topic_ai_agent_detected_all_criteria_missing(monkeypatch):
+    _no_llm(monkeypatch)
+    issues = checklist.assess_topic("Telegram", "Хочу настроить ИИ-агента для чата с клиентами")
+    assert len(issues) == 4
+    assert any("для кого" in i for i in issues)
+    assert any("какой результат" in i for i in issues)
+
+
+def test_topic_tilda_iiko_requires_both_keywords(monkeypatch):
+    _no_llm(monkeypatch)
+    # Тильда без айко/iiko — тема не должна определяться как tilda_iiko
+    assert checklist.assess_topic("Tilda", "Нужен сайт на Тильде") == []
+
+
+def test_topic_tilda_iiko_detected_all_criteria_missing(monkeypatch):
+    _no_llm(monkeypatch)
+    issues = checklist.assess_topic("Tilda, iiko", "Нужно связать Тильду и iiko для приёма заказов")
+    assert len(issues) == 5
+    assert any("модификаторы" in i for i in issues)
+    assert any("наличными или картой" in i for i in issues)
+
+
+def test_topic_yandex_metrika_detected(monkeypatch):
+    _no_llm(monkeypatch)
+    issues = checklist.assess_topic("Яндекс Метрика", "Нужно настроить Яндекс Метрику на сайте")
+    assert len(issues) == 1
+    assert "счётчики" in issues[0]
+
+
+def test_topic_max_bot_detected(monkeypatch):
+    _no_llm(monkeypatch)
+    issues = checklist.assess_topic("Макс", "Нужен бот в мессенджере Макс для рассылок")
+    assert len(issues) == 1
+    assert "уже бот в мессенджере Макс" in issues[0]
+
+
+def test_topic_max_alone_without_bot_keyword_not_detected(monkeypatch):
+    _no_llm(monkeypatch)
+    # "Макс" может быть именем/словом — без слова "бот" рядом тема не должна определяться
+    assert checklist.assess_topic("CRM", "Клиента зовут Макс, нужна интеграция CRM с Sheets") == []
+
+
+def test_assess_topic_empty_input_returns_no_topic(monkeypatch):
+    _no_llm(monkeypatch)
+    assert checklist.assess_topic(None, None) == []

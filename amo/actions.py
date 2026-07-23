@@ -55,11 +55,40 @@ def extract_lead_data(lead: dict) -> dict:
 
 
 def move_to_negotiations(lead_id: int) -> None:
+    """«Первичные переговоры» — сразу после отправки первого сообщения, независимо от того,
+    ответит клиент или нет (см. core/state_machine.py: process_new_deal)."""
     amo_client.update_lead_status(lead_id, settings.amocrm_stage_negotiations_id)
+
+
+def move_to_clarification(lead_id: int) -> None:
+    """«Уточнение ТЗ» — клиент ответил, идёт классификация ответа (см. handle_incoming_reply)."""
+    amo_client.update_lead_status(lead_id, settings.amocrm_stage_clarification_id)
+
+
+def move_to_silence(lead_id: int) -> None:
+    """«Молчание» — отправлено напоминание №1 («ваша заявка актуальна?»), ответа пока нет
+    (см. core/state_machine.py: process_scheduler_tick)."""
+    amo_client.update_lead_status(lead_id, settings.amocrm_stage_silence_id)
+
+
+def get_lead_status_id(lead_id: int) -> int | None:
+    """Текущий этап сделки в amoCRM — используется шедулером, чтобы не слать напоминания, если
+    сделку вручную перевели на другой этап (см. core/state_machine.py)."""
+    return amo_client.get_lead(lead_id).get("status_id")
+
+
+def move_to_manual_review(lead_id: int) -> None:
+    """«Ручная проверка» — классификация ответа завершена (positive/negative/ambiguous),
+    дальше сделку ведёт человек."""
+    amo_client.update_lead_status(lead_id, settings.amocrm_stage_manual_review_id)
 
 
 def move_to_blocked(lead_id: int) -> None:
     amo_client.update_lead_status(lead_id, settings.amocrm_stage_blocked_id)
+
+
+def add_note(lead_id: int, text: str) -> None:
+    amo_client.create_note(lead_id, text)
 
 
 def create_manager_task(lead_id: int, text: str, due_in_hours: int = 1) -> None:

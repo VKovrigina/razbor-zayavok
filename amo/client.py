@@ -66,6 +66,9 @@ class AmoClient:
     def get_contact(self, contact_id: int) -> dict:
         return self.get(f"/api/v4/contacts/{contact_id}")
 
+    def get_lead(self, lead_id: int) -> dict:
+        return self.get(f"/api/v4/leads/{lead_id}")
+
     def update_lead_status(self, lead_id: int, status_id: int) -> None:
         self.patch(f"/api/v4/leads/{lead_id}", {"status_id": status_id})
 
@@ -82,6 +85,16 @@ class AmoClient:
             }
         ]
         return self.post("/api/v4/tasks", payload)
+
+    def create_note(self, lead_id: int, text: str) -> dict:
+        payload = [
+            {
+                "entity_id": lead_id,
+                "note_type": "common",
+                "params": {"text": text},
+            }
+        ]
+        return self.post("/api/v4/leads/notes", payload)
 
 
 amo_client = AmoClient()

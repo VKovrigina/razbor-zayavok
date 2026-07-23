@@ -10,27 +10,38 @@ logger = logging.getLogger(__name__)
 
 _client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
-# Временно выключено (2026-07-23): ответы в FAQ_ENTRIES ниже местами placeholder
-# ("[ЗАПОЛНИТЬ: ...]") — пока docs/faq-knowledge-base.md не заполнен реальными фактами (цены,
-# сроки, условия тарифа), включать нельзя — иначе бот отправит заглушку живому клиенту.
-# Включить обратно: FAQ_ENABLED = True, после переноса финальных ответов в FAQ_ENTRIES.
-FAQ_ENABLED = False
+# FAQ_ENTRIES ниже смешивает пункты с реальным содержанием и черновики-плейсхолдеры
+# ("[ЗАПОЛНИТЬ: ...]") — плейсхолдеры исключаются из подбора (_USABLE_ENTRIES ниже), чтобы бот
+# никогда не отправил заглушку живому клиенту. FAQ_ENABLED включён — работают только заполненные
+# пункты; остальные становятся доступны автоматически по мере заполнения.
+FAQ_ENABLED = True
 
 _NO_MATCH = "none"
+_PLACEHOLDER_MARKER = "[ЗАПОЛНИТЬ"
 
-# Черновик — тексты ответов взяты из docs/faq-knowledge-base.md как заглушки.
-# TODO: перенести сюда финальные ответы после того, как в docs/faq-knowledge-base.md будут
-# заполнены реальные факты (цены, сроки, условия тарифа) — сейчас answer местами placeholder.
+# Каждый answer — САМОДОСТАТОЧНОЕ сообщение целиком (факт + при необходимости следующий вопрос
+# клиенту). Если бот подобрал пункт при неоднозначном ответе — он отправляет answer и остаётся
+# ждать реакции клиента (та же цепочка напоминаний, что после первого сообщения; см.
+# core/state_machine.py: handle_incoming_reply).
 FAQ_ENTRIES = [
     {
         "id": "faq_price",
         "examples": "сколько это стоит, какая цена, сколько будет стоить интеграция",
-        "answer": "[ЗАПОЛНИТЬ: faq_price — см. docs/faq-knowledge-base.md]",
+        "answer": (
+            "Точная цена станет понятна после того, как партнёр-интегратор оценит вашу задачу — "
+            "он же сориентирует вас и по нужному тарифу Альбато.\n\n"
+            "Подскажите, пожалуйста: как часто вы планируете пользоваться этой интеграцией? "
+            "Это поможет точнее посчитать, какой тариф вам подойдёт."
+        ),
     },
     {
         "id": "faq_timeline",
         "examples": "сколько по срокам, как быстро сделаете, когда будет готово",
-        "answer": "[ЗАПОЛНИТЬ: faq_timeline — см. docs/faq-knowledge-base.md]",
+        "answer": (
+            "Вашу заявку мы выложим на партнёрскую биржу сразу, как только вы дадите согласие. "
+            "Обычно партнёры оценивают задачу в течение дня, в редких случаях — до 2 дней.\n\n"
+            "Могу я передать вашу задачу партнёрам на оценку?"
+        ),
     },
     {
         "id": "faq_albato_tariff",
@@ -42,7 +53,11 @@ FAQ_ENTRIES = [
     {
         "id": "faq_who_is_integrator",
         "examples": "кто такой интегратор, почему я плачу не только Альбато, это ваш сотрудник",
-        "answer": "[ЗАПОЛНИТЬ: faq_who_is_integrator — см. docs/faq-knowledge-base.md]",
+        "answer": (
+            "Наши партнёры — не сотрудники Альбато. Это интеграторы с опытом в настройке, "
+            "которые в том числе прошли наше обучение.\n\n"
+            "Могу я передать вашу задачу партнёрам на оценку?"
+        ),
     },
     {
         "id": "faq_free_estimate",
@@ -78,6 +93,9 @@ FAQ_ENTRIES = [
 
 _FAQ_BY_ID = {entry["id"]: entry for entry in FAQ_ENTRIES}
 
+# Плейсхолдеры-черновики исключены — Claude физически не может их выбрать (нет в enum ниже).
+_USABLE_ENTRIES = [e for e in FAQ_ENTRIES if not e["answer"].startswith(_PLACEHOLDER_MARKER)]
+
 _TOOL = {
     "name": "match_faq",
     "description": (
@@ -89,7 +107,7 @@ _TOOL = {
         "properties": {
             "faq_id": {
                 "type": "string",
-                "enum": [entry["id"] for entry in FAQ_ENTRIES] + [_NO_MATCH],
+                "enum": [entry["id"] for entry in _USABLE_ENTRIES] + [_NO_MATCH],
             }
         },
         "required": ["faq_id"],
@@ -104,7 +122,7 @@ _SYSTEM_PROMPT = """Ты помогаешь подобрать готовый о
 
 
 def _faq_catalog_text() -> str:
-    return "\n".join(f"- {e['id']}: {e['examples']}" for e in FAQ_ENTRIES)
+    return "\n".join(f"- {e['id']}: {e['examples']}" for e in _USABLE_ENTRIES)
 
 
 def match_faq_sync(message_text: str, case_context: str | None) -> str | None:

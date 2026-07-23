@@ -261,6 +261,35 @@ def unlock(deal_id: int) -> None:
         )
 
 
+def stop_reminders(deal_id: int) -> None:
+    """Сделку вручную перевели в amoCRM на этап вне зоны ответственности бота (не «Первичные
+    переговоры»/«Молчание»/«Уточнение ТЗ») — снимаем next_action_at, чтобы шедулер больше не
+    подбирал эту сделку, статус в локальной БД не трогаем."""
+    ts = now_iso()
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE deals SET next_action_at = NULL, in_progress = 0, updated_at = ? WHERE deal_id = ?",
+            (ts, deal_id),
+        )
+    log_event(deal_id, "system", None, "Напоминания остановлены: сделка вручную перемещена на другой этап CRM")
+
+
+def restart_reminder_cycle(deal_id: int, next_action_at: str) -> None:
+    """Бот сам задал клиенту уточняющий вопрос (ответ из базы знаний + вопрос "передавать ли
+    задачу на оценку партнёрам") и ждёт ответа — запускает ту же цепочку напоминаний, что и после
+    первого сообщения (см. core/state_machine.py: handle_incoming_reply/process_scheduler_tick)."""
+    ts = now_iso()
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE deals
+            SET status = ?, next_action_at = ?, reminder_count = 0, in_progress = 0, updated_at = ?
+            WHERE deal_id = ?
+            """,
+            (Status.AWAITING_REPLY_1.value, next_action_at, ts, deal_id),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Telegram flood-wait cooldown
 # ---------------------------------------------------------------------------
