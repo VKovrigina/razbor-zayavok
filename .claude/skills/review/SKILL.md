@@ -1,0 +1,217 @@
+---
+name: review
+user-invocable: true
+description: Code review skill — structured review with architecture, code quality, tests, accessibility, security checks. Used at stage 4 of WORKFLOW pipeline OR standalone. Outputs review-{section}.md with verdict APPROVED or CHANGES REQUESTED. Triggers on review request, before merge, or after implementation.
+---
+
+# Skill: Interactive Code Review
+
+> Структурированный code review с options и рекомендациями. Для standalone использования вне pipeline.
+> Запуск: `/review` или "сделай code review", "проверь код"
+
+---
+
+## Когда вызывать
+
+- После завершения фичи/бага (вне pipeline)
+- Перед мержем в main
+- Для ревью чужого кода / PR
+- Для самопроверки перед отправкой
+
+---
+
+## Процесс
+
+### 1. Определить режим
+
+Спросить пользователя:
+```
+Режим ревью:
+1/ BIG — полный (4 секции, до 4 issues в каждой)
+2/ SMALL — быстрый (1 вопрос на секцию)
+```
+
+### 2. Четыре секции ревью
+
+#### Секция 1: Architecture
+- Design: правильно ли выбран подход?
+- Coupling: нет ли лишних зависимостей?
+- Data flow: данные идут правильным путём?
+- Security: нет ли XSS, injection, CSRF проблем?
+
+#### Секция 2: Code Quality
+- Organization: файлы на своих местах? Naming ok?
+- DRY: нет ли дублирования?
+- Error handling: ошибки обработаны?
+- Tech debt: не создаём ли новый долг?
+
+#### Секция 3: Tests
+- Coverage: все ли пути покрыты?
+- Assertions: тесты проверяют реальное поведение, не trivial?
+- Edge cases: граничные случаи покрыты?
+- Failure modes: что если API упал, данные пустые, timeout?
+
+#### Секция 4: Performance
+- N+1: нет ли лишних запросов в цикле?
+- Memory: нет ли утечек (неочищенные listeners, refs)?
+- Caching: можно ли кэшировать?
+- Complexity: O(n) vs O(n²)?
+
+#### Секция 5: CTO Review (для COMPLEX задач)
+- Scope: масштаб изменений адекватен задаче?
+- Risk assessment: что может сломаться? Rollback plan?
+- Alternatives: рассмотрены ли другие подходы?
+- Dependencies: не создаём ли coupling между модулями?
+- Scalability: выдержит ли 10x нагрузку?
+- Security: OWASP top 10, auth/authz, input validation?
+
+### 3. Формат для каждого issue
+
+```markdown
+### Issue {N}: {название}
+
+**Файл:** `{path}:{line}`
+**Severity:** 🔴 Critical / 🟡 Warning / 🟢 Info
+
+**Проблема:** {описание}
+
+**Options:**
+A) {рекомендуемый вариант}
+   - Effort: {low/medium/high}
+   - Risk: {low/medium/high}
+   - Impact: {описание}
+
+B) {альтернатива}
+   - Effort: {low/medium/high}
+   - Risk: {low/medium/high}
+   - Impact: {описание}
+
+C) Do nothing
+   - Risk: {описание}
+
+**Рекомендация:** Option A — {почему}
+```
+
+### 4. Итог
+
+```markdown
+## Review Summary
+
+| Секция | Issues | Critical | Warning | Info |
+|--------|--------|----------|---------|------|
+| Architecture | {N} | {N} | {N} | {N} |
+| Code Quality | {N} | {N} | {N} | {N} |
+| Tests | {N} | {N} | {N} | {N} |
+| Performance | {N} | {N} | {N} | {N} |
+
+**Verdict:** APPROVE / REQUEST CHANGES / BLOCK
+
+### Blocking issues:
+{list if any}
+
+### Recommended improvements:
+{list if any}
+```
+
+---
+
+## Engineering Preferences
+
+- DRY — флаговать дублирование агрессивно
+- Тесты — обязательны, не опционально
+- "Engineered enough" — не хрупко, не over-abstracted
+- Больше edge cases, не меньше
+- Explicit лучше clever
+- Каждый issue = file:line + конкретные options
+
+---
+
+## Rubric + Verdict (усиление, источник: Superpowers `requesting-code-review`)
+
+**Whole-branch review дроби fresh-субагентом** (свой контекст, не история сессии).
+Обязателен после крупной фичи и перед мержем. Дробить с git-диапазоном (BASE..HEAD).
+
+**Read-only:** ревьюер НЕ мутирует рабочее дерево/индекс/HEAD. Только `git show/diff/log`;
+для чужой ревизии — отдельный `git worktree`, не двигать HEAD.
+
+**5 осей (чек-лист, не «посмотри код»):**
+1. **Plan alignment** — реализовано по плану/требованиям? Отклонения — улучшения или проблемы?
+2. **Code quality** — separation of concerns, error handling, type safety, DRY без преждевременной абстракции, edge cases.
+3. **Architecture** — здравые решения, scalability/perf, security, чистая интеграция.
+4. **Testing** — тесты проверяют **реальное поведение, не моки**; edge cases; integration где важно; все зелёные.
+5. **Production readiness** — миграции, обратная совместимость, доки, очевидные баги.
+
+**Калибровка severity** (не всё Critical):
+- 🔴 **Critical (Must Fix)** — баги, security, потеря данных, сломанная функциональность.
+- 🟡 **Important (Should Fix)** — архитектура, missing features, плохой error handling, дыры в тестах.
+- 🟢 **Minor (Nice to Have)** — стиль, оптимизация, доки.
+
+Каждый issue = `file:line + что не так + почему важно + как чинить`. **Сначала признать strengths** (точная похвала повышает доверие к остальному фидбеку).
+
+**Обязательный verdict в конце:** `Ready to merge? Yes / No / With fixes` + 1-2 предложения обоснования. Без вердикта review не завершён.
+
+---
+
+## Evidence gate + Adversarial clearing (усиление, источник: Superpowers + Localisation-Agent pipeline)
+
+Ревью ≠ «прогнал линтер → APPROVED». Два обязательных дополнения к рубрике выше:
+
+**1. Evidence gate — ДО написания findings.** Никогда не утверждать finding без доказательства:
+- Прогнать **ПОЛНЫЙ** тест-suite (не только новые тесты) — это regression-доказательство; записать «N passed, M skipped».
+- Прочитать реально изменённые файлы (`file:line`), не только summary разработчика.
+- На каждое поведение, которое утверждаешь — **найти тест, который это доказывает, и процитировать его имя**.
+- Бар: «I now have complete evidence for each finding». Нет доказательства → пометить finding **UNVERIFIED** и сказать, что нужно для подтверждения.
+
+**2. Adversarial clearing — доказывай ОТСУТСТВИЕ, а не просто опускай.** Явно ПРОВЕРИТЬ и ОЧИСТИТЬ ключевые категории риска, релевантные изменению, с доказательством. `CLEAN (no issue found) because <evidence>` — **требуемый вывод**, а не пропуск. Именно это отличает реальное ревью от беглого просмотра.
+
+| Категория | Verdict | Доказательство |
+|-----------|---------|----------------|
+| Injection (SQL/command) | CLEAN / ISSUE | {параметризованные запросы file:line} |
+| XSS / output encoding | CLEAN / ISSUE / N-A | {esc()-раундтрип экранирует каждое поле} |
+| AuthZ / access control | CLEAN / ISSUE | {каждый роут за auth; tenant-scope применён} |
+| Secrets never leak | CLEAN / ISSUE | {masked; резолв server-side; assert в тесте X} |
+| Partial-failure / idempotency | CORRECT / BROKEN | {re-apply = no-op; тест Y} |
+| Pagination / N+1 | CORRECT / ISSUE | {total из meta; одна выборка, не per-row} |
+
+**3. Verdict-taxonomy — три состояния (не бинарно):**
+- **APPROVED** — нет findings выше `minor`; ship.
+- **APPROVE-WITH-NITS** — функционально ок, тесты зелёные, блокеров нет; остались только `minor`/by-design ниты (перечислить, мерж разрешён).
+- **CHANGES REQUESTED / BLOCK** — ≥1 `critical`/`important` finding, или падающий/отсутствующий тест на реальном пути.
+
+Verdict — первой строкой; findings по severity; cleared-categories таблица — обязательна. Шаблон: `~/.claude/templates/review-template.md`.
+
+---
+
+## ⭐ Adversarial steady-state + confirm-pass (усиление 2026-07-13, источник: Localisation-Agent + iux4 `isConnected` баг)
+
+Урок: one-shot sub-agent ревью подтвердил код с латентным багом (флаг всегда `true`) —
+поймал только независимый второй слой. Отсюда три обязательных усиления:
+
+**1. Трассируй РЕАЛЬНЫЙ steady-state, не happy-path.** APPROVED ставится за то, что
+код верен на **втором запуске / пустых данных / после рестарта / при частичном отказе** —
+а не только на чистом первом прогоне. Найди **воспроизводимый прод-баг**, а не «выглядит ок».
+
+**2. Каждый finding = `file:line` + `failureScenario` + `testGap`:**
+- `failureScenario` — конкретный вход/состояние → неверный выход или краш (шаги воспроизведения).
+- `testGap` — **докажи, что существующие тесты этого НЕ ловят**: назови тест, который
+  «зелёный», но проходит мимо бага. Finding без доказанного testGap — слабый, пометь `UNVERIFIED`.
+
+**3. Confirm-pass — ревью не заканчивается на «нашёл».** После того как разработчик
+починил finding, **ТОТ ЖЕ ревьюер перепроверяет фикс В КОРНЕ** — не «тест позеленел»,
+а что причина устранена и `failureScenario` больше не воспроизводится:
+- `confirmStillBroken: true` → **мерж заблокирован**, фикс возвращается на доработку.
+- Только `confirmStillBroken: false` на всех critical/major закрывает ревью.
+
+**Дисциплина по дорожкам (кто и на чём ревьюит — см. `~/.claude/WORKFLOW.md` Этап 4):**
+- **XS/S инлайн-код** → 1 независимый ревьюер на `git diff` перед мержем (оркестратор НЕ
+  self-review-and-merge кода); может **ESCALATE** в Workflow при рисковой поверхности.
+- **M/L/XL Workflow** → reviewer **на Opus** + confirm-pass + независимое ревью оркестратора
+  на полном diff перед мержем. One-shot sub-agent ревью НИКОГДА не достаточно.
+- **Trivial** (docs/config/rename/test-only) → solo, ревьюер не нужен.
+
+**🚦 Merge-block:** любой нерешённый `critical`/`major` ИЛИ `confirmStillBroken:true` = мерж запрещён.
+
+---
+
+После получения findings → применять через skill `/receiving-review`. Ожидай **confirm-pass**
+ревьюера после фикса — задача не закрыта, пока фикс не подтверждён в корне.

@@ -1,0 +1,50 @@
+# Project Configuration
+# Сгенерировано вручную по итогам /init-project (перенос ../ТГ агент под фреймворк)
+# Edit manually to reconfigure
+
+project:
+  name: "Разбор заявок"
+  type: "maintenance" # существующий рабочий код, перенесён под pipeline, не greenfield
+  initialized: "2026-07-23"
+
+stack:
+  languages:
+    - python
+  frameworks:
+    - asyncio
+    - telethon
+    - anthropic
+  testing:
+    - pytest
+
+multi_agent:
+  enabled: false
+  mode: "none" # один агент делает всё — проект небольшой (< 10K LOC)
+  roles: []
+
+conventions:
+  git:
+    branch_prefix: ["feat", "fix", "refactor", "docs", "test", "chore"]
+    commit_format: "conventional"
+    pr_per_task: true
+    base_branch: "main"
+  code:
+    max_service_lines: 400
+    test_coverage: 80
+  architecture: "layered" # core (business logic) / channels (I/O) / db
+
+reference:
+  visual_diff:
+    enabled: false # backend-агент без UI
+  figma:
+    enabled: false
+  legacy:
+    enabled: true
+    path: "../ТГ агент" # оригинал кода, decommissioned после cutover 2026-07-23 (данных там больше нет)
+
+custom_skills:
+
+research_md:
+  required: true
+  path: "RESEARCH.md"
+  status: "done" # deep-analysis выполнен при переносе 2026-07-23
