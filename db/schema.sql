@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS deals (
     stack_text          TEXT,
     case_text           TEXT,
     reminder_count      INTEGER NOT NULL DEFAULT 0,
+    faq_cycle_count     INTEGER NOT NULL DEFAULT 0,
     next_action_at      TEXT,
     in_progress         INTEGER NOT NULL DEFAULT 0,
     telegram_send_cooldown_until TEXT,

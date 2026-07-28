@@ -54,3 +54,19 @@ def test_placeholder_ids_not_offered_to_claude_tool_schema():
 def test_real_entries_answers_have_no_placeholder_marker():
     for entry_id in ("faq_price", "faq_timeline", "faq_who_is_integrator"):
         assert "[ЗАПОЛНИТЬ" not in faq.get_answer(entry_id)
+
+
+def test_all_entries_filled_no_placeholders_remain():
+    """P-003 закрыт — все пункты базы знаний заполнены реальными фактами, ни одного черновика
+    "[ЗАПОЛНИТЬ" быть не должно."""
+    for entry in faq.FAQ_ENTRIES:
+        assert not entry["answer"].startswith("[ЗАПОЛНИТЬ"), entry["id"]
+    assert {e["id"] for e in faq._USABLE_ENTRIES} == {e["id"] for e in faq.FAQ_ENTRIES}
+
+
+def test_no_duplicate_closing_question_in_faq_timeline_and_who_is_integrator():
+    """Закрывающий вопрос про передачу кейса на оценку теперь добавляется враппером
+    core/templates.py: faq_answer_with_followup ко ВСЕМ ответам — сам answer не должен его
+    повторять (иначе клиент увидит один и тот же вопрос дважды в одном сообщении)."""
+    for entry_id in ("faq_timeline", "faq_who_is_integrator"):
+        assert "передать вашу задачу партнёрам на оценку" not in faq.get_answer(entry_id)

@@ -36,6 +36,11 @@ _LOCK_RETRY_ATTEMPTS = 4  # ~60 секунд суммарного ожидани
 _ESCALATE_RETRY_ATTEMPTS = 3
 _ESCALATE_RETRY_DELAY_SECONDS = 1
 
+# Сколько раз подряд бот может сам ответить на встречный вопрос клиента (FAQ-ветка), прежде чем
+# принудительно эскалировать на Варвару вместо очередного автоответа — защита от бесконечного
+# цикла, если клиент постоянно задаёт вопросы из базы знаний (P-020 в BACKLOG.md).
+_FAQ_CYCLE_CAP = 5
+
 
 async def _send_via_channel(deal: Deal, text: str) -> None:
     if deal.channel == Channel.TELEGRAM:
@@ -211,10 +216,17 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
     и сделку можно безопасно разблокировать без риска дублей при следующей попытке (P-008 в
     BACKLOG.md).
 
-    Ambiguous С совпадением в базе знаний — бот отвечает сам и остаётся ждать реакции клиента
-    (`repo.restart_reminder_cycle`, та же цепочка напоминаний, что после первого сообщения),
-    БЕЗ эскалации на Варвару — до тех пор, пока не придёт содержательный ответ (тогда следующий
-    вызов этой функции классифицирует его как positive/negative) или вопрос без ответа в базе.
+    Ambiguous С совпадением в базе знаний — бот отвечает сам (ответ + закрывающий вопрос про
+    передачу кейса на оценку, `templates.faq_answer_with_followup`) и остаётся ждать реакции
+    клиента (`repo.restart_reminder_cycle`, та же цепочка напоминаний, что после первого
+    сообщения). На КАЖДЫЙ такой автоответ ставится задача Варваре (человек в курсе, что бот
+    ответил сам) — но полной эскалации (перевод на 'Ручная проверка') пока нет: следующий ответ
+    клиента снова проходит через эту функцию (содержательный ответ → positive/negative → обычная
+    эскалация ниже; ещё один вопрос из базы знаний → снова эта ветка). После `_FAQ_CYCLE_CAP`
+    подряд отвеченных вопросов по одной сделке — принудительная полная эскалация вместо
+    очередного автоответа (P-020 в BACKLOG.md). Если отправить автоответ не удалось — это
+    равносильно "ответа в базе нет": обычная эскалация с `REPLY_AMBIGUOUS`, `restart_reminder_cycle`
+    не вызывается (P-019 в BACKLOG.md).
 
     Если сделка занята (напр. шедулер шлёт напоминание) — не бросаем сообщение сразу, а пробуем
     получить блокировку ещё `_LOCK_RETRY_ATTEMPTS` раз с паузой `_LOCK_RETRY_INTERVAL_SECONDS`
@@ -269,23 +281,45 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
         except Exception:
             logger.exception("Сделка %s: подбор ответа из базы знаний не удался", deal_id)
 
+        faq_answer_sent = False
+        faq_answer = None
         if faq_id:
-            # Бот сам отвечает на встречный вопрос и ждёт реакции клиента — не эскалирует на
-            # Варвару сразу (см. Логика ИИ агента.md, п.3). Дальше решает следующий ответ клиента:
-            # содержательный ответ по существу → positive → обычная эскалация ниже; ещё один
-            # вопрос с ответом в базе знаний → снова эта же ветка; вопрос без ответа в базе →
-            # ambiguous без совпадения → REPLY_AMBIGUOUS + эскалация ниже.
             faq_answer = faq_client.get_answer(faq_id)
+            combined_text = templates.faq_answer_with_followup(faq_answer)
             try:
-                await _send_via_channel(deal, faq_answer)
-                repo.log_event(deal_id, "out", deal.channel.value, faq_answer)
+                await _send_via_channel(deal, combined_text)
+                repo.log_event(deal_id, "out", deal.channel.value, combined_text)
+                faq_answer_sent = True
             except Exception:
                 logger.exception("Сделка %s: не удалось отправить ответ из базы знаний", deal_id)
-            repo.restart_reminder_cycle(deal_id, timeutils.next_reminder_at_iso())
-            return
-        reply_text = templates.REPLY_AMBIGUOUS
-        task_text = templates.TASK_TEXT_CLARIFICATION
-        new_status = Status.ESCALATED_AMBIGUOUS
+
+        if faq_answer_sent:
+            # Задача Варваре на КАЖДЫЙ автоответ — человек в курсе, что бот ответил сам (продуктовое
+            # решение, см. Логика ИИ агента.md).
+            try:
+                await asyncio.to_thread(
+                    amo_actions.create_manager_task, deal_id,
+                    templates.task_text_faq_answered(text, faq_answer),
+                )
+            except Exception:
+                logger.exception(
+                    "Сделка %s: не удалось создать задачу Варваре по авто-ответу FAQ", deal_id
+                )
+
+            cycle_count = repo.restart_reminder_cycle(deal_id, timeutils.next_reminder_at_iso())
+            if cycle_count < _FAQ_CYCLE_CAP:
+                return
+            # Предел повторов исчерпан (P-020) — принудительно эскалируем. Клиенту уже отправлен
+            # ответ+закрывающий вопрос выше, повторно REPLY_AMBIGUOUS не шлём (reply_text=None).
+            reply_text = None
+            task_text = templates.TASK_TEXT_FAQ_LIMIT_REACHED
+            new_status = Status.ESCALATED_AMBIGUOUS
+        else:
+            # Ответа в базе знаний нет, либо отправка не удалась (P-019: в обоих случаях клиент
+            # ничего содержательного не получил — restart_reminder_cycle не вызываем).
+            reply_text = templates.REPLY_AMBIGUOUS
+            task_text = templates.TASK_TEXT_CLARIFICATION
+            new_status = Status.ESCALATED_AMBIGUOUS
 
     if not await _escalate_with_retries(deal_id, new_status):
         logger.warning(
@@ -306,11 +340,14 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
         except Exception:
             logger.exception("Сделка %s: не удалось добавить примечание с ТЗ", deal_id)
 
-    try:
-        await _send_via_channel(deal, reply_text)
-        repo.log_event(deal_id, "out", deal.channel.value, reply_text)
-    except Exception:
-        logger.exception("Сделка %s: не удалось отправить ответ клиенту (%s)", deal_id, category)
+    if reply_text is not None:
+        # None — только когда предел повторов FAQ-цикла исчерпан: клиенту уже отправлен ответ+
+        # закрывающий вопрос выше, повторно слать нечего.
+        try:
+            await _send_via_channel(deal, reply_text)
+            repo.log_event(deal_id, "out", deal.channel.value, reply_text)
+        except Exception:
+            logger.exception("Сделка %s: не удалось отправить ответ клиенту (%s)", deal_id, category)
 
     try:
         await asyncio.to_thread(amo_actions.move_to_manual_review, deal_id)

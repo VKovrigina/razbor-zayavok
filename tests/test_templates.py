@@ -1,4 +1,13 @@
-from core.templates import DEFAULT_CLOSING_QUESTIONS, FIRST_MESSAGE_VARIANTS, first_message, spec_note
+from core.templates import (
+    DEFAULT_CLOSING_QUESTIONS,
+    FAQ_FOLLOWUP_QUESTIONS,
+    FIRST_MESSAGE_VARIANTS,
+    TASK_TEXT_FAQ_LIMIT_REACHED,
+    faq_answer_with_followup,
+    first_message,
+    spec_note,
+    task_text_faq_answered,
+)
 
 
 def test_first_message_substitutes_placeholders():
@@ -80,3 +89,19 @@ def test_spec_note_formats_stack_and_case():
 def test_spec_note_uses_dash_fallback_for_missing_fields():
     note = spec_note(None, None)
     assert note == "🔸Сервисы: —\n🔸Задача: —"
+
+
+def test_faq_answer_with_followup_appends_one_of_known_questions():
+    combined = faq_answer_with_followup("Оценка бесплатная.")
+    assert combined.startswith("Оценка бесплатная.\n\n")
+    assert any(combined.endswith(q) for q in FAQ_FOLLOWUP_QUESTIONS)
+
+
+def test_task_text_faq_answered_includes_question_and_answer():
+    text = task_text_faq_answered("Сколько стоит?", "Точная цена после оценки.")
+    assert "Сколько стоит?" in text
+    assert "Точная цена после оценки." in text
+
+
+def test_task_text_faq_limit_reached_is_non_empty():
+    assert isinstance(TASK_TEXT_FAQ_LIMIT_REACHED, str) and TASK_TEXT_FAQ_LIMIT_REACHED

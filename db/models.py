@@ -58,6 +58,7 @@ class Deal:
     stack_text: str | None
     case_text: str | None
     reminder_count: int
+    faq_cycle_count: int
     next_action_at: str | None
     in_progress: bool
     telegram_send_cooldown_until: str | None
@@ -78,6 +79,7 @@ class Deal:
             stack_text=row["stack_text"],
             case_text=row["case_text"],
             reminder_count=row["reminder_count"],
+            faq_cycle_count=row["faq_cycle_count"],
             next_action_at=row["next_action_at"],
             in_progress=bool(row["in_progress"]),
             telegram_send_cooldown_until=row["telegram_send_cooldown_until"],

@@ -143,10 +143,23 @@ REPLY_NEGATIVE = (
 
 REPLY_AMBIGUOUS = "Ваш вопрос я зафиксировала, в ближайшее время с вами свяжется менеджер."
 
+# Закрывающий вопрос после автоответа на встречный вопрос клиента (см. core/state_machine.py:
+# handle_incoming_reply, FAQ-ветка) — вариативность по той же причине, что и
+# DEFAULT_CLOSING_QUESTIONS (антибан-энтропия), плюс явно сообщает, что вопрос передан человеку.
+FAQ_FOLLOWUP_QUESTIONS = [
+    "Я передала ваш вопрос менеджеру, он подключится к диалогу. А пока могу отдать ваш кейс партнёрам на оценку?",
+    "Ваш вопрос я передала менеджеру. Могу уже сейчас передать задачу партнёрам на оценку?",
+    "Этот вопрос я передала менеджеру, он ответит вам отдельно. А пока — могу отправить ваш кейс на оценку партнёрам?",
+]
+
 TASK_TEXT_FINALIZE_SPEC = "Клиент согласовал условия — оформить задачу/ТЗ по сделке."
 TASK_TEXT_NEGATIVE_CLIENT = "Негативный клиент — нужно подключиться к диалогу."
 TASK_TEXT_CLARIFICATION = "уточнение"
 TASK_TEXT_NO_CHANNEL = "Не удалось связаться с клиентом: нет ни Telegram, ни email в сделке."
+TASK_TEXT_FAQ_LIMIT_REACHED = (
+    "Клиент несколько раз подряд задавал встречные вопросы (бот отвечал автоматически по базе "
+    "знаний) — достигнут лимит повторов, дальше нужно ручное вмешательство."
+)
 TASK_TEXT_SUPERSEDED_TEMPLATE = (
     "Эта сделка автоматически переведена в 'Блок': клиент прислал новую заявку {new_deal_id}, "
     "бот работает дальше только с ней. Проверьте, не ошибка ли это."
@@ -181,3 +194,15 @@ def spec_note(stack: str | None, case: str | None) -> str:
 
 def task_text_superseded(new_deal_id: int) -> str:
     return TASK_TEXT_SUPERSEDED_TEMPLATE.format(new_deal_id=new_deal_id)
+
+
+def faq_answer_with_followup(answer: str) -> str:
+    """Ответ из базы знаний (classify/faq.py) + закрывающий вопрос про передачу кейса на оценку,
+    одним сообщением (см. core/state_machine.py: handle_incoming_reply, FAQ-ветка)."""
+    return f"{answer}\n\n{random.choice(FAQ_FOLLOWUP_QUESTIONS)}"
+
+
+def task_text_faq_answered(question: str, answer: str) -> str:
+    """Задача Варваре при КАЖДОМ автоответе на встречный вопрос — чтобы человек был в курсе,
+    что бот ответил сам (см. core/state_machine.py: handle_incoming_reply, FAQ-ветка)."""
+    return f"Клиент задал встречный вопрос, бот ответил автоматически.\nВопрос: {question}\nОтвет: {answer}"

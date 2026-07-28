@@ -76,6 +76,26 @@ def test_restart_reminder_cycle_resets_to_awaiting_reply_1(repo):
     assert deal.next_action_at == next_action_at
 
 
+def test_create_deal_new_initializes_faq_cycle_count_to_zero(repo):
+    repo.create_deal_new(41, 400, "Анна", "anna_test", None, "amoCRM", "Кейс 4")
+    assert repo.get_deal(41).faq_cycle_count == 0
+
+
+def test_restart_reminder_cycle_increments_faq_cycle_count_and_returns_it(repo):
+    """P-020: вызывающая сторона (core/state_machine.py) решает по возвращённому значению, не
+    пора ли принудительно эскалировать вместо очередного автоответа на встречный вопрос."""
+    from core import timeutils
+
+    repo.create_deal_new(42, 400, "Анна", "anna_test", None, "amoCRM", "Кейс 4")
+    repo.set_awaiting_first_sent(42, "telegram", 111, timeutils.to_iso(timeutils.utcnow()))
+
+    next_action_at = timeutils.to_iso(timeutils.utcnow())
+    assert repo.restart_reminder_cycle(42, next_action_at) == 1
+    assert repo.restart_reminder_cycle(42, next_action_at) == 2
+    assert repo.restart_reminder_cycle(42, next_action_at) == 3
+    assert repo.get_deal(42).faq_cycle_count == 3
+
+
 def test_stop_reminders_clears_next_action_at_without_changing_status(repo):
     from core import timeutils
 

@@ -31,6 +31,16 @@ def _connect():
 def init_db() -> None:
     with _connect() as conn:
         conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        _migrate_add_faq_cycle_count(conn)
+
+
+def _migrate_add_faq_cycle_count(conn: sqlite3.Connection) -> None:
+    """`CREATE TABLE IF NOT EXISTS` в schema.sql не добавляет новые колонки в уже существующую
+    таблицу — на боевой БД, созданной до появления `faq_cycle_count`, колонки не будет без явного
+    ALTER TABLE."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(deals)")}
+    if "faq_cycle_count" not in columns:
+        conn.execute("ALTER TABLE deals ADD COLUMN faq_cycle_count INTEGER NOT NULL DEFAULT 0")
 
 
 # ---------------------------------------------------------------------------
@@ -104,8 +114,9 @@ def create_deal_new(
             INSERT INTO deals (
                 deal_id, contact_id, status, channel, telegram_username, telegram_peer_id,
                 email_address, contact_name, stack_text, case_text, reminder_count,
-                next_action_at, in_progress, telegram_send_cooldown_until, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, NULL, 0, NULL, ?, ?)
+                faq_cycle_count, next_action_at, in_progress, telegram_send_cooldown_until,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, 0, NULL, 0, NULL, ?, ?)
             """,
             (
                 deal_id,
@@ -299,20 +310,28 @@ def stop_reminders(deal_id: int) -> None:
     log_event(deal_id, "system", None, "Напоминания остановлены: сделка вручную перемещена на другой этап CRM")
 
 
-def restart_reminder_cycle(deal_id: int, next_action_at: str) -> None:
+def restart_reminder_cycle(deal_id: int, next_action_at: str) -> int:
     """Бот сам задал клиенту уточняющий вопрос (ответ из базы знаний + вопрос "передавать ли
     задачу на оценку партнёрам") и ждёт ответа — запускает ту же цепочку напоминаний, что и после
-    первого сообщения (см. core/state_machine.py: handle_incoming_reply/process_scheduler_tick)."""
+    первого сообщения (см. core/state_machine.py: handle_incoming_reply/process_scheduler_tick).
+    Инкрементирует `faq_cycle_count` и возвращает новое значение — по нему вызывающая сторона
+    решает, не пора ли принудительно эскалировать вместо очередного автоответа (защита от
+    бесконечного цикла, см. P-020 в BACKLOG.md)."""
     ts = now_iso()
     with _connect() as conn:
         conn.execute(
             """
             UPDATE deals
-            SET status = ?, next_action_at = ?, reminder_count = 0, in_progress = 0, updated_at = ?
+            SET status = ?, next_action_at = ?, reminder_count = 0,
+                faq_cycle_count = faq_cycle_count + 1, in_progress = 0, updated_at = ?
             WHERE deal_id = ?
             """,
             (Status.AWAITING_REPLY_1.value, next_action_at, ts, deal_id),
         )
+        row = conn.execute(
+            "SELECT faq_cycle_count FROM deals WHERE deal_id = ?", (deal_id,)
+        ).fetchone()
+        return row["faq_cycle_count"]
 
 
 # ---------------------------------------------------------------------------
