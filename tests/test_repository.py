@@ -1,4 +1,4 @@
-from db.models import Status
+from db.models import Channel, Status
 
 
 def test_create_and_get_deal(repo):
@@ -7,6 +7,18 @@ def test_create_and_get_deal(repo):
     assert deal is not None
     assert deal.status == Status.NEW
     assert deal.telegram_username == "ivan_test"
+
+
+def test_create_deal_new_flags_telegram_channel_when_username_present(repo):
+    repo.create_deal_new(101, 100, "Иван", "ivan_test", "ivan@example.com", "Bitrix24", "Кейс")
+    deal = repo.get_deal(101)
+    assert deal.channel == Channel.TELEGRAM
+
+
+def test_create_deal_new_flags_email_channel_when_no_telegram_username(repo):
+    repo.create_deal_new(102, 100, "Иван", None, "ivan@example.com", "Bitrix24", "Кейс")
+    deal = repo.get_deal(102)
+    assert deal.channel == Channel.EMAIL
 
 
 def test_conflict_detected_then_cleared_after_escalation(repo):
@@ -79,3 +91,25 @@ def test_stop_reminders_clears_next_action_at_without_changing_status(repo):
 
     due = repo.list_due_rows(timeutils.to_iso(timeutils.utcnow()))
     assert not any(d.deal_id == 5 for d in due)
+
+
+def test_block_superseded_sets_blocked_status_and_stops_reminders(repo):
+    from core import timeutils
+
+    repo.create_deal_new(6, 600, "Виктор", "viktor_test", None, "amoCRM", "Кейс 6")
+    repo.set_awaiting_first_sent(6, "telegram", 333, timeutils.to_iso(timeutils.utcnow()))
+
+    repo.block_superseded(6, new_deal_id=7)
+
+    deal = repo.get_deal(6)
+    assert deal.status == Status.BLOCKED
+    assert deal.next_action_at is None
+    assert deal.in_progress is False
+
+
+def test_blocked_deal_not_reopenable_via_conflict_check(repo):
+    repo.create_deal_new(8, 800, "Галина", "galina_test", None, "amoCRM", "Кейс 8")
+    repo.block_superseded(8, new_deal_id=9)
+
+    conflict = repo.find_conflicting_active_deal("galina_test", None, exclude_deal_id=10)
+    assert conflict is None  # BLOCKED — не активная, не считается конфликтом для будущих сделок

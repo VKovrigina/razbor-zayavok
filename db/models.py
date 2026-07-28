@@ -13,6 +13,7 @@ class Status(str, Enum):
     ESCALATED_NEGATIVE = "ESCALATED_NEGATIVE"
     ESCALATED_AMBIGUOUS = "ESCALATED_AMBIGUOUS"
     FAILED = "FAILED"
+    BLOCKED = "BLOCKED"
 
 
 TERMINAL_ESCALATED_STATUSES = {
@@ -27,6 +28,10 @@ AWAITING_STATUSES = {
     Status.AWAITING_REPLY_2,
     Status.CLOSED_NO_REPLY,
 }
+
+# сделка окончательно закрыта для бота — не переоткрывается входящим сообщением, не считается
+# "активной" при проверке конфликта идентификатора клиента (см. find_conflicting_active_deal)
+INACTIVE_STATUSES = TERMINAL_ESCALATED_STATUSES | {Status.FAILED, Status.BLOCKED}
 
 
 class Channel(str, Enum):

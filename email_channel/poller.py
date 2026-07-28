@@ -7,6 +7,7 @@ import imaplib
 import logging
 from email.header import decode_header
 
+from amo import actions as amo_actions
 from config import settings
 from db import repository as repo
 from db.models import Channel
@@ -87,7 +88,13 @@ async def poll_once() -> None:
         if deal is None:
             continue
         try:
-            await state_machine.handle_incoming_reply(deal.deal_id, body, Channel.EMAIL)
+            if deal.channel == Channel.TELEGRAM:
+                # Переписка по этой сделке ведётся в Telegram — письмо не запускает сценарий
+                # параллельно, просто фиксируется в сделке для видимости (см. P-007 в BACKLOG.md).
+                repo.log_event(deal.deal_id, "in", Channel.EMAIL.value, body)
+                await asyncio.to_thread(amo_actions.add_note, deal.deal_id, f"Почта: {body}")
+            else:
+                await state_machine.handle_incoming_reply(deal.deal_id, body, Channel.EMAIL)
         except Exception:
             logger.exception("Ошибка обработки входящего письма по сделке %s", deal.deal_id)
 

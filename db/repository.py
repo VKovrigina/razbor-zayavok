@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from config import settings
-from db.models import AWAITING_STATUSES, Deal, Status, TERMINAL_ESCALATED_STATUSES
+from db.models import AWAITING_STATUSES, Channel, Deal, INACTIVE_STATUSES, Status
 
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
@@ -53,10 +53,10 @@ def find_conflicting_active_deal(
     telegram_username: str | None, email_address: str | None, exclude_deal_id: int | None = None
 ) -> Deal | None:
     """Ищет уже отслеживаемую сделку с тем же идентификатором клиента (username/email),
-    которая ещё не находится в финальном "решённом" состоянии (ESCALATED_*/FAILED).
+    которая ещё не находится в финальном "решённом" состоянии (см. INACTIVE_STATUSES).
     Нужно, чтобы не вести два параллельных автоматических диалога с одним и тем же человеком —
     иначе входящее сообщение в Telegram/письмо невозможно однозначно привязать к сделке."""
-    done = tuple(s.value for s in TERMINAL_ESCALATED_STATUSES) + (Status.FAILED.value,)
+    done = tuple(s.value for s in INACTIVE_STATUSES)
     placeholders = ",".join("?" for _ in done)
     clauses = []
     params: list = []
@@ -90,7 +90,14 @@ def create_deal_new(
     stack_text: str | None,
     case_text: str | None,
 ) -> None:
+    """Заводит сделку сразу с флагом канала: если в CRM указан Telegram-username — канал
+    'telegram', иначе 'email'. Флаг ставится СРАЗУ, до какой-либо попытки отправки — это нужно,
+    чтобы входящее письмо, пришедшее, пока идёт долгая антибан-пауза перед первой Telegram-
+    отправкой, не запускало полный сценарий по почте параллельно с Telegram (см. P-007 в
+    BACKLOG.md, `email_channel/poller.py`). Если отправка в Telegram в итоге не удастся и бот
+    реально перейдёт на email — `set_awaiting_first_sent` перезапишет канал на актуальный."""
     ts = now_iso()
+    channel = Channel.TELEGRAM if telegram_username else Channel.EMAIL
     with _connect() as conn:
         conn.execute(
             """
@@ -98,12 +105,13 @@ def create_deal_new(
                 deal_id, contact_id, status, channel, telegram_username, telegram_peer_id,
                 email_address, contact_name, stack_text, case_text, reminder_count,
                 next_action_at, in_progress, telegram_send_cooldown_until, created_at, updated_at
-            ) VALUES (?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?, 0, NULL, 0, NULL, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, NULL, 0, NULL, ?, ?)
             """,
             (
                 deal_id,
                 contact_id,
                 Status.NEW.value,
+                channel.value,
                 telegram_username,
                 email_address,
                 contact_name,
@@ -166,6 +174,23 @@ def close_no_reply(deal_id: int) -> None:
             """,
             (Status.CLOSED_NO_REPLY.value, ts, deal_id),
         )
+
+
+def block_superseded(deal_id: int, new_deal_id: int) -> None:
+    """Клиент прислал НОВУЮ заявку, пока эта ещё активна — старую считаем окончательно закрытой
+    (в отличие от CLOSED_NO_REPLY, эта сделка НЕ переоткрывается входящим сообщением, см.
+    INACTIVE_STATUSES) и работаем дальше только с новой (см. amo/poller.py)."""
+    ts = now_iso()
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE deals
+            SET status = ?, next_action_at = NULL, in_progress = 0, updated_at = ?
+            WHERE deal_id = ?
+            """,
+            (Status.BLOCKED.value, ts, deal_id),
+        )
+    log_event(deal_id, "system", None, f"Заблокирована: заменена новой заявкой {new_deal_id}")
 
 
 def escalate(deal_id: int, status: Status) -> None:

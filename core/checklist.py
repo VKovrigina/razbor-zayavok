@@ -72,7 +72,11 @@ def _case_describes_problem_or_data(case_text: str | None) -> bool:
     )
     for block in response.content:
         if block.type == "tool_use" and block.name == "assess_case":
-            return bool(block.input["describes_problem_or_data"])
+            value = block.input.get("describes_problem_or_data")
+            if value is None:
+                logger.warning("assess_case: ответ модели без обязательного поля, считаем недостаточно")
+                return False
+            return bool(value)
     logger.warning("assess_case: Claude не вернул tool_use, считаем что описания недостаточно")
     return False
 
@@ -222,7 +226,11 @@ def assess_topic(stack_text: str | None, case_text: str | None) -> list[str]:
 
     response = _client.messages.create(
         model=settings.anthropic_model,
-        max_tokens=300,
+        # 1024, не 300 — per_criterion_analysis для тем с 5 критериями (tilda_iiko) может быть
+        # длинным; при более низком лимите ответ обрезался ДО поля "topic" (оно идёт в схеме
+        # после per_criterion_analysis) — KeyError на проде, сделка навсегда застревала в NEW
+        # (см. BACKLOG.md, найдено 2026-07-27).
+        max_tokens=1024,
         system=_TOPIC_SYSTEM_PROMPT,
         tools=[_TOPIC_TOOL],
         tool_choice={"type": "tool", "name": "assess_topic"},
@@ -235,8 +243,11 @@ def assess_topic(stack_text: str | None, case_text: str | None) -> list[str]:
     )
     for block in response.content:
         if block.type == "tool_use" and block.name == "assess_topic":
-            topic = block.input["topic"]
-            if topic == "none" or topic not in _TOPIC_DEFINITIONS:
+            topic = block.input.get("topic")
+            # Ответ модели мог быть обрезан по max_tokens ДО заполнения обязательных полей —
+            # это не то же самое, что "тема не найдена", но безопасный дефолт тот же: не задавать
+            # тематических вопросов, а не падать (см. комментарий про max_tokens выше).
+            if not topic or topic == "none" or topic not in _TOPIC_DEFINITIONS:
                 return []
             missing_ids = set(block.input.get("missing_criteria_ids") or [])
             criteria = _TOPIC_DEFINITIONS[topic]["criteria"]

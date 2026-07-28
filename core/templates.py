@@ -147,8 +147,9 @@ TASK_TEXT_FINALIZE_SPEC = "Клиент согласовал условия — 
 TASK_TEXT_NEGATIVE_CLIENT = "Негативный клиент — нужно подключиться к диалогу."
 TASK_TEXT_CLARIFICATION = "уточнение"
 TASK_TEXT_NO_CHANNEL = "Не удалось связаться с клиентом: нет ни Telegram, ни email в сделке."
-TASK_TEXT_IDENTITY_CONFLICT = (
-    "У этого клиента уже есть другая активная сделка в работе у бота — обработать вручную."
+TASK_TEXT_SUPERSEDED_TEMPLATE = (
+    "Эта сделка автоматически переведена в 'Блок': клиент прислал новую заявку {new_deal_id}, "
+    "бот работает дальше только с ней. Проверьте, не ошибка ли это."
 )
 
 
@@ -176,3 +177,7 @@ def spec_note(stack: str | None, case: str | None) -> str:
     """Примечание к сделке в amoCRM с собранным ТЗ — добавляется при позитивном ответе клиента
     перед переводом сделки на этап «Ручная проверка» (см. core/state_machine.py)."""
     return f"🔸Сервисы: {stack or '—'}\n🔸Задача: {case or '—'}"
+
+
+def task_text_superseded(new_deal_id: int) -> str:
+    return TASK_TEXT_SUPERSEDED_TEMPLATE.format(new_deal_id=new_deal_id)

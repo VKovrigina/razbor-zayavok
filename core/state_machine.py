@@ -10,10 +10,9 @@ from classify import faq as faq_client
 from config import settings
 from core import checklist, templates, timeutils
 from db import repository as repo
-from db.models import Channel, Deal, ReplyCategory, Status, TERMINAL_ESCALATED_STATUSES
+from db.models import Channel, Deal, INACTIVE_STATUSES, ReplyCategory, Status
 from email_channel import sender as email_sender
 from telegram_channel import sender as telegram_sender
-from telegram_channel.sender import TelegramSendError
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +24,17 @@ _REMINDER_ELIGIBLE_STAGE_IDS = {
     settings.amocrm_stage_silence_id,
     settings.amocrm_stage_clarification_id,
 }
+
+# Если сделка занята (напр. шедулер шлёт напоминание, ~15-90с) — не бросаем входящее сообщение
+# сразу, а пробуем ещё несколько раз (см. handle_incoming_reply): P-009 в BACKLOG.md.
+_LOCK_RETRY_INTERVAL_SECONDS = 15
+_LOCK_RETRY_ATTEMPTS = 4  # ~60 секунд суммарного ожидания
+
+# repo.escalate — единственный шаг в handle_incoming_reply, который обязан зафиксироваться
+# (иначе сделка виснет заблокированной навсегда, см. P-008 в BACKLOG.md) — несколько попыток на
+# случай мимолётной ошибки SQLite ("database is locked").
+_ESCALATE_RETRY_ATTEMPTS = 3
+_ESCALATE_RETRY_DELAY_SECONDS = 1
 
 
 async def _send_via_channel(deal: Deal, text: str) -> None:
@@ -40,7 +50,9 @@ async def _send_via_channel(deal: Deal, text: str) -> None:
 async def _send_first_contact(deal_id: int, deal: Deal, text: str) -> tuple[Channel, int | None] | None:
     """Отправляет `text` первым сообщением (Telegram, с fallback на email), логирует и
     возвращает (канал, telegram_peer_id), либо None (и заводит FAILED-задачу на Варвару), если
-    ни один канал не сработал."""
+    ни один канал не сработал. Любая ошибка Telegram (не только известные FloodWait/приватность/
+    неверный username) даёт шанс на email-резерв — сделка не должна теряться из-за незнакомого
+    типа ошибки Telethon (P-011 в BACKLOG.md)."""
     channel: Channel | None = None
     peer_id: int | None = None
 
@@ -48,8 +60,11 @@ async def _send_first_contact(deal_id: int, deal: Deal, text: str) -> tuple[Chan
         try:
             peer_id = await telegram_sender.send_first_contact(deal.telegram_username, text)
             channel = Channel.TELEGRAM
-        except TelegramSendError as e:
-            logger.info("Сделка %s: Telegram недоступен (%s), пробуем email", deal_id, e)
+        except Exception:
+            # Не только TelegramSendError (FloodWait/PeerFlood/приватность/неверный username) —
+            # любая другая ошибка Telethon (забаненный/деактивированный аккаунт, сетевой сбой и
+            # т.п.) тоже должна давать шанс на email-резерв, а не терять сделку молча (P-011).
+            logger.exception("Сделка %s: Telegram недоступен, пробуем email", deal_id)
 
     if channel is None and deal.email_address:
         try:
@@ -111,6 +126,28 @@ def _deal_in_reminder_eligible_stage(deal_id: int) -> bool:
     return status_id in _REMINDER_ELIGIBLE_STAGE_IDS
 
 
+async def _escalate_with_retries(deal_id: int, new_status: Status) -> bool:
+    """`repo.escalate` — единственный шаг классификации ответа, который обязан зафиксироваться
+    (см. P-008 в BACKLOG.md): вызывается ДО побочных эффектов (примечание/ответ клиенту/смена
+    этапа/задача Варваре), поэтому если он так и не пройдёт после нескольких попыток — ничего
+    из побочных эффектов ещё не произошло и можно безопасно отменить обработку без риска дублей."""
+    for attempt in range(1, _ESCALATE_RETRY_ATTEMPTS + 1):
+        try:
+            repo.escalate(deal_id, new_status)
+            return True
+        except Exception:
+            logger.exception(
+                "Сделка %s: попытка %s/%s зафиксировать эскалацию (%s) не удалась",
+                deal_id,
+                attempt,
+                _ESCALATE_RETRY_ATTEMPTS,
+                new_status,
+            )
+            if attempt < _ESCALATE_RETRY_ATTEMPTS:
+                await asyncio.sleep(_ESCALATE_RETRY_DELAY_SECONDS)
+    return False
+
+
 async def process_scheduler_tick() -> None:
     """Вызывается периодически: рассылает напоминание №1 / закрывающее сообщение тем, у кого
     подошло время, согласно `next_action_at`. Та же цепочка обслуживает и ожидание ответа на
@@ -166,21 +203,43 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
 
     Positive/negative, а также ambiguous без совпадения в базе знаний — сразу переводятся на этап
     'Ручная проверка' и на Варвару ставится задача (после этого бот больше не реагирует на
-    сообщения по этой сделке, см. TERMINAL_ESCALATED_STATUSES). Если ответ positive — перед
+    сообщения по этой сделке, см. INACTIVE_STATUSES). Если ответ positive — перед
     переводом в сделку добавляется примечание с собранным ТЗ (см. `core/templates.py: spec_note`).
+
+    `repo.escalate` (см. `_escalate_with_retries`) вызывается ДО этих побочных эффектов, не после
+    — если зафиксировать эскалацию так и не удастся, ничего из побочных эффектов ещё не произошло,
+    и сделку можно безопасно разблокировать без риска дублей при следующей попытке (P-008 в
+    BACKLOG.md).
 
     Ambiguous С совпадением в базе знаний — бот отвечает сам и остаётся ждать реакции клиента
     (`repo.restart_reminder_cycle`, та же цепочка напоминаний, что после первого сообщения),
     БЕЗ эскалации на Варвару — до тех пор, пока не придёт содержательный ответ (тогда следующий
-    вызов этой функции классифицирует его как positive/negative) или вопрос без ответа в базе."""
+    вызов этой функции классифицирует его как positive/negative) или вопрос без ответа в базе.
+
+    Если сделка занята (напр. шедулер шлёт напоминание) — не бросаем сообщение сразу, а пробуем
+    получить блокировку ещё `_LOCK_RETRY_ATTEMPTS` раз с паузой `_LOCK_RETRY_INTERVAL_SECONDS`
+    (~60 секунд суммарно); если так и не удалось — логируем предупреждение с текстом сообщения
+    и выходим (P-009 в BACKLOG.md)."""
     deal = repo.get_deal(deal_id)
     if deal is None:
         return
-    if deal.status in TERMINAL_ESCALATED_STATUSES or deal.status == Status.FAILED:
-        return  # уже эскалировано человеку — бот не вмешивается
+    if deal.status in INACTIVE_STATUSES:
+        return  # уже эскалировано/заблокировано/провалено — бот не вмешивается
 
     if not repo.try_lock(deal_id):
-        return  # сделка сейчас обрабатывается (напр. шедулер шлёт напоминание)
+        for _ in range(_LOCK_RETRY_ATTEMPTS):
+            await asyncio.sleep(_LOCK_RETRY_INTERVAL_SECONDS)
+            if repo.try_lock(deal_id):
+                break
+        else:
+            logger.warning(
+                "Сделка %s: не удалось получить блокировку за ~%s сек — входящее сообщение "
+                "потеряно: %r",
+                deal_id,
+                _LOCK_RETRY_ATTEMPTS * _LOCK_RETRY_INTERVAL_SECONDS,
+                text[:200],
+            )
+            return
 
     repo.log_event(deal_id, "in", channel.value, text)
 
@@ -228,6 +287,17 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
         task_text = templates.TASK_TEXT_CLARIFICATION
         new_status = Status.ESCALATED_AMBIGUOUS
 
+    if not await _escalate_with_retries(deal_id, new_status):
+        logger.warning(
+            "Сделка %s: эскалация (%s) не зафиксирована после %s попыток — сообщение клиента "
+            "не обработано, сделка разблокирована для повторной попытки",
+            deal_id,
+            new_status,
+            _ESCALATE_RETRY_ATTEMPTS,
+        )
+        repo.unlock(deal_id)
+        return
+
     if category == ReplyCategory.POSITIVE:
         case_with_reply = f"{deal.case_text or ''}\n\nОтвет клиента: {text}".strip()
         note_text = templates.spec_note(deal.stack_text, case_with_reply)
@@ -251,5 +321,3 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
         await asyncio.to_thread(amo_actions.create_manager_task, deal_id, task_text)
     except Exception:
         logger.exception("Сделка %s: не удалось создать задачу на Варвару", deal_id)
-
-    repo.escalate(deal_id, new_status)

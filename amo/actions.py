@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import re
 import time
 
 from amo.client import amo_client
 from config import settings
+
+# Правила самого Telegram: 5-32 символа, буквы/цифры/подчёркивание, начинается с буквы.
+# Нужно, чтобы заглушки вроде "-" (поле в CRM не заполнено) не считались настоящим username —
+# иначе они уходят в Telegram-отправку (гарантированно упадёт) и, хуже, в проверку конфликта
+# идентификатора клиента, где два случайных клиента с одинаковой заглушкой "склеиваются" в
+# одного (см. BACKLOG.md, найдено на проде 2026-07-24).
+_USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
 
 
 def _get_field_value(entity: dict, field_id: int | None = None, field_code: str | None = None) -> str | None:
@@ -25,7 +33,8 @@ def _clean_username(value: str | None) -> str | None:
         value = value[len("https://t.me/"):]
     if value.startswith("@"):
         value = value[1:]
-    return value or None
+    value = value.strip()
+    return value if _USERNAME_RE.match(value) else None
 
 
 def extract_lead_data(lead: dict) -> dict:

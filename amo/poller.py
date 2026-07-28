@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from amo.actions import create_manager_task, extract_lead_data
+from amo.actions import create_manager_task, extract_lead_data, move_to_blocked
 from amo.client import amo_client
 from config import settings
 from core import state_machine, templates
@@ -45,15 +45,29 @@ async def poll_once() -> None:
 
         if conflict:
             logger.warning(
-                "Сделка %s: конфликт идентификатора клиента с уже отслеживаемой сделкой %s",
+                "Сделка %s: клиент уже вёл диалог в сделке %s — блокируем старую, работаем с новой",
                 deal_id,
                 conflict.deal_id,
             )
-            repo.mark_failed(deal_id, templates.TASK_TEXT_IDENTITY_CONFLICT)
-            await asyncio.to_thread(
-                create_manager_task, deal_id, templates.TASK_TEXT_IDENTITY_CONFLICT
-            )
-            continue
+            try:
+                await asyncio.to_thread(move_to_blocked, conflict.deal_id)
+            except Exception:
+                logger.exception(
+                    "Сделка %s: не удалось перевести на этап 'Блок' (замена сделкой %s)",
+                    conflict.deal_id,
+                    deal_id,
+                )
+            repo.block_superseded(conflict.deal_id, deal_id)
+            try:
+                await asyncio.to_thread(
+                    create_manager_task, conflict.deal_id, templates.task_text_superseded(deal_id)
+                )
+            except Exception:
+                logger.exception(
+                    "Сделка %s: не удалось создать задачу на Варвару (замена сделкой %s)",
+                    conflict.deal_id,
+                    deal_id,
+                )
 
         await state_machine.process_new_deal(deal_id)
 

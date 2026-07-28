@@ -6,5 +6,6 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
+graphify-out/
 data/.telegram_login_state.json
 data/*.log
