@@ -133,6 +133,11 @@ def _process_new_deal(deal_id: int):
 
 
 def _patch_first_contact_success(monkeypatch):
+    """Полностью детерминированная подготовка + отправка — без единого реального сетевого вызова
+    (ни Anthropic, ни amoCRM, ни Telegram), чтобы тест не зависел от сети/квоты и не полз в
+    реальный `mark_failed`+`create_manager_task` при случайной заминке внешнего API."""
+    monkeypatch.setattr(state_machine.checklist, "assess", lambda stack_text, case_text: [])
+    monkeypatch.setattr(state_machine.checklist, "assess_topic", lambda stack_text, case_text: [])
     monkeypatch.setattr(state_machine.amo_actions, "move_to_negotiations", lambda deal_id: None)
 
     async def fake_send_first_contact(username, text):
@@ -185,3 +190,107 @@ def test_process_new_deal_prep_failure_marks_failed_without_sending(repo, monkey
     assert deal.status == Status.FAILED
     assert send_first_contact_called is False
     assert manager_tasks == [(11, state_machine.templates.TASK_TEXT_PREP_FAILED)]
+
+
+def test_incoming_log_event_failure_unlocks_and_aborts(repo, monkeypatch):
+    """P-038: если зафиксировать входящее сообщение не удалось после нескольких попыток — сделка
+    разблокируется, а не остаётся занятой навсегда; дальше обработка не идёт (классификация не
+    вызывается)."""
+    monkeypatch.setattr(state_machine, "_DB_WRITE_RETRY_DELAY_SECONDS", 0)
+    _make_deal_awaiting_reply(repo, 20)
+
+    classify_called = False
+
+    def should_not_be_called(text, case):
+        nonlocal classify_called
+        classify_called = True
+        return ReplyCategory.AMBIGUOUS
+
+    monkeypatch.setattr(state_machine.classify_client, "classify_sync", should_not_be_called)
+
+    real_log_event = state_machine.repo.log_event
+
+    def failing_log_event(deal_id, direction, channel, text):
+        if direction == "in":
+            raise RuntimeError("database is locked")
+        return real_log_event(deal_id, direction, channel, text)
+
+    monkeypatch.setattr(state_machine.repo, "log_event", failing_log_event)
+
+    _handle(20, "какой-то ответ")
+
+    deal = repo.get_deal(20)
+    assert deal.in_progress is False
+    assert deal.status == Status.AWAITING_REPLY_1  # обработка не продолжилась
+    assert classify_called is False
+
+
+def test_restart_reminder_cycle_failure_unlocks_and_aborts(repo, monkeypatch):
+    """P-038: тот же принцип для restart_reminder_cycle в FAQ-ветке — сбой не должен оставлять
+    сделку заблокированной навсегда."""
+    monkeypatch.setattr(state_machine, "_DB_WRITE_RETRY_DELAY_SECONDS", 0)
+    manager_tasks, sent_messages = _patch_common(monkeypatch)
+    _patch_faq_match(monkeypatch, "faq_price", "Точная цена после оценки.")
+    _make_deal_awaiting_reply(repo, 21)
+
+    def failing_restart(deal_id, next_action_at):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(state_machine.repo, "restart_reminder_cycle", failing_restart)
+
+    _handle(21, "сколько это стоит?")
+
+    deal = repo.get_deal(21)
+    assert deal.in_progress is False
+    assert deal.status == Status.AWAITING_REPLY_1  # restart_reminder_cycle так и не зафиксировался
+    assert len(sent_messages) == 1  # ответ клиенту всё же ушёл до сбоя
+    assert len(manager_tasks) == 1  # задача на авто-ответ тоже успела создаться до сбоя
+
+
+def _make_deal_escalated(repo, deal_id: int, status: Status):
+    from core import timeutils
+
+    repo.create_deal_new(deal_id, 900 + deal_id, "Клиент", "client_test", None, "amoCRM", "Кейс")
+    repo.set_awaiting_first_sent(
+        deal_id, Channel.TELEGRAM.value, 12345, timeutils.to_iso(timeutils.utcnow())
+    )
+    repo.escalate(deal_id, status)
+
+
+def test_post_positive_escalation_faq_match_answers_without_followup_or_task(repo, monkeypatch):
+    manager_tasks, sent_messages = _patch_common(monkeypatch)
+    _patch_faq_match(monkeypatch, "faq_price", "Точная цена после оценки.")
+    _make_deal_escalated(repo, 30, Status.ESCALATED_POSITIVE)
+
+    _handle(30, "а сколько всё-таки стоит?")
+
+    deal = repo.get_deal(30)
+    assert deal.status == Status.ESCALATED_POSITIVE  # статус не меняется
+    assert deal.in_progress is False
+    assert sent_messages == ["Точная цена после оценки."]  # БЕЗ закрывающего вопроса
+    assert manager_tasks == []  # БЕЗ новой задачи
+
+
+def test_post_positive_escalation_no_match_sends_fixed_reply_without_task(repo, monkeypatch):
+    manager_tasks, sent_messages = _patch_common(monkeypatch)
+    _patch_faq_match(monkeypatch, None)
+    _make_deal_escalated(repo, 31, Status.ESCALATED_POSITIVE)
+
+    _handle(31, "вопрос, которого нет в базе")
+
+    deal = repo.get_deal(31)
+    assert deal.status == Status.ESCALATED_POSITIVE
+    assert sent_messages == [state_machine.templates.REPLY_NO_FAQ_MATCH_AFTER_POSITIVE]
+    assert manager_tasks == []
+
+
+def test_other_escalated_statuses_remain_fully_silent(repo, monkeypatch):
+    manager_tasks, sent_messages = _patch_common(monkeypatch)
+    _patch_faq_match(monkeypatch, "faq_price", "Точная цена после оценки.")
+    _make_deal_escalated(repo, 32, Status.ESCALATED_NEGATIVE)
+
+    _handle(32, "у вас есть ответ на мой вопрос?")
+
+    assert repo.get_deal(32).status == Status.ESCALATED_NEGATIVE
+    assert sent_messages == []
+    assert manager_tasks == []

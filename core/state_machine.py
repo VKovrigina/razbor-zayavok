@@ -30,11 +30,12 @@ _REMINDER_ELIGIBLE_STAGE_IDS = {
 _LOCK_RETRY_INTERVAL_SECONDS = 15
 _LOCK_RETRY_ATTEMPTS = 4  # ~60 секунд суммарного ожидания
 
-# repo.escalate — единственный шаг в handle_incoming_reply, который обязан зафиксироваться
-# (иначе сделка виснет заблокированной навсегда, см. P-008 в BACKLOG.md) — несколько попыток на
-# случай мимолётной ошибки SQLite ("database is locked").
-_ESCALATE_RETRY_ATTEMPTS = 3
-_ESCALATE_RETRY_DELAY_SECONDS = 1
+# Шаги в handle_incoming_reply, которые обязаны либо зафиксироваться, либо явно разблокировать
+# сделку (иначе она виснет заблокированной навсегда, см. P-008/P-038 в BACKLOG.md) — несколько
+# попыток на случай мимолётной ошибки SQLite ("database is locked"): repo.escalate,
+# log_event входящего, restart_reminder_cycle.
+_DB_WRITE_RETRY_ATTEMPTS = 3
+_DB_WRITE_RETRY_DELAY_SECONDS = 1
 
 # Сколько раз подряд бот может сам ответить на встречный вопрос клиента (FAQ-ветка), прежде чем
 # принудительно эскалировать на Варвару вместо очередного автоответа — защита от бесконечного
@@ -153,7 +154,7 @@ async def _escalate_with_retries(deal_id: int, new_status: Status) -> bool:
     (см. P-008 в BACKLOG.md): вызывается ДО побочных эффектов (примечание/ответ клиенту/смена
     этапа/задача Варваре), поэтому если он так и не пройдёт после нескольких попыток — ничего
     из побочных эффектов ещё не произошло и можно безопасно отменить обработку без риска дублей."""
-    for attempt in range(1, _ESCALATE_RETRY_ATTEMPTS + 1):
+    for attempt in range(1, _DB_WRITE_RETRY_ATTEMPTS + 1):
         try:
             repo.escalate(deal_id, new_status)
             return True
@@ -162,12 +163,51 @@ async def _escalate_with_retries(deal_id: int, new_status: Status) -> bool:
                 "Сделка %s: попытка %s/%s зафиксировать эскалацию (%s) не удалась",
                 deal_id,
                 attempt,
-                _ESCALATE_RETRY_ATTEMPTS,
+                _DB_WRITE_RETRY_ATTEMPTS,
                 new_status,
             )
-            if attempt < _ESCALATE_RETRY_ATTEMPTS:
-                await asyncio.sleep(_ESCALATE_RETRY_DELAY_SECONDS)
+            if attempt < _DB_WRITE_RETRY_ATTEMPTS:
+                await asyncio.sleep(_DB_WRITE_RETRY_DELAY_SECONDS)
     return False
+
+
+async def _log_event_with_retries(deal_id: int, direction: str, channel: str | None, text: str) -> bool:
+    """Как и `repo.escalate` — обязан либо зафиксироваться, либо дать вызывающей стороне явно
+    разблокировать сделку, а не оставить её занятой навсегда (P-038 в BACKLOG.md)."""
+    for attempt in range(1, _DB_WRITE_RETRY_ATTEMPTS + 1):
+        try:
+            repo.log_event(deal_id, direction, channel, text)
+            return True
+        except Exception:
+            logger.exception(
+                "Сделка %s: попытка %s/%s записать событие (%s) не удалась",
+                deal_id,
+                attempt,
+                _DB_WRITE_RETRY_ATTEMPTS,
+                direction,
+            )
+            if attempt < _DB_WRITE_RETRY_ATTEMPTS:
+                await asyncio.sleep(_DB_WRITE_RETRY_DELAY_SECONDS)
+    return False
+
+
+async def _restart_reminder_cycle_with_retries(deal_id: int, next_action_at: str) -> int | None:
+    """Как и `repo.escalate` — обязан либо зафиксироваться, либо дать вызывающей стороне явно
+    разблокировать сделку (P-038 в BACKLOG.md). Возвращает `faq_cycle_count` либо `None` при
+    исчерпании попыток."""
+    for attempt in range(1, _DB_WRITE_RETRY_ATTEMPTS + 1):
+        try:
+            return repo.restart_reminder_cycle(deal_id, next_action_at)
+        except Exception:
+            logger.exception(
+                "Сделка %s: попытка %s/%s зафиксировать restart_reminder_cycle не удалась",
+                deal_id,
+                attempt,
+                _DB_WRITE_RETRY_ATTEMPTS,
+            )
+            if attempt < _DB_WRITE_RETRY_ATTEMPTS:
+                await asyncio.sleep(_DB_WRITE_RETRY_DELAY_SECONDS)
+    return None
 
 
 async def process_scheduler_tick() -> None:
@@ -219,6 +259,46 @@ async def process_scheduler_tick() -> None:
             repo.reschedule(deal_id, retry_at)
 
 
+async def _answer_faq_after_positive(deal_id: int, deal: Deal, text: str) -> None:
+    """Клиент уже согласился (сделка в `ESCALATED_POSITIVE`, ТЗ собрано и передано), но продолжает
+    писать вопросы. Бот по-прежнему может ответить по базе знаний — но БЕЗ закрывающего вопроса
+    про передачу кейса на оценку (кейс уже передан) и БЕЗ новой задачи Варваре (человек уже в
+    курсе, задача `TASK_TEXT_FINALIZE_SPEC` уже стоит). Если вопрос не нашёлся в базе — фиксированный
+    ответ, что тема будет закрыта вместе с результатом оценки (тоже без задачи). Продуктовое
+    решение, см. Логика ИИ агента.md.
+
+    Лок берётся однократно, без ретраев (в отличие от основного пути) — это необязательная
+    любезность поверх уже завершённого сценария, не стоит того, чтобы держать клиента в очереди
+    на повторные попытки; если сделка занята — просто пропускаем этот вопрос."""
+    if not repo.try_lock(deal_id):
+        return
+
+    try:
+        repo.log_event(deal_id, "in", deal.channel.value if deal.channel else None, text)
+
+        faq_id = None
+        try:
+            faq_id = await asyncio.to_thread(faq_client.match_faq_sync, text, deal.case_text)
+        except Exception:
+            logger.exception(
+                "Сделка %s: подбор ответа из базы знаний (после согласия клиента) не удался",
+                deal_id,
+            )
+
+        reply_text = (
+            faq_client.get_answer(faq_id) if faq_id else templates.REPLY_NO_FAQ_MATCH_AFTER_POSITIVE
+        )
+        try:
+            await _send_via_channel(deal, reply_text)
+            repo.log_event(deal_id, "out", deal.channel.value, reply_text)
+        except Exception:
+            logger.exception(
+                "Сделка %s: не удалось отправить ответ клиенту после согласия", deal_id
+            )
+    finally:
+        repo.unlock(deal_id)
+
+
 async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> None:
     """Входящее сообщение от клиента (Telegram или email). Любой ответ переводит сделку на этап
     'Уточнение ТЗ' и классифицируется на positive/negative/ambiguous.
@@ -248,12 +328,19 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
     Если сделка занята (напр. шедулер шлёт напоминание) — не бросаем сообщение сразу, а пробуем
     получить блокировку ещё `_LOCK_RETRY_ATTEMPTS` раз с паузой `_LOCK_RETRY_INTERVAL_SECONDS`
     (~60 секунд суммарно); если так и не удалось — логируем предупреждение с текстом сообщения
-    и выходим (P-009 в BACKLOG.md)."""
+    и выходим (P-009 в BACKLOG.md).
+
+    `ESCALATED_POSITIVE` — исключение среди `INACTIVE_STATUSES`: клиент уже согласился, ТЗ собрано
+    и передано, но он может продолжать задавать вопросы. Такие сообщения не доходят до классификации
+    и полного цикла выше — см. `_answer_faq_after_positive` (без закрывающего вопроса про оценку
+    кейса — он уже передан, и без новой задачи Варваре — человек уже в курсе)."""
     deal = repo.get_deal(deal_id)
     if deal is None:
         return
     if deal.status in INACTIVE_STATUSES:
-        return  # уже эскалировано/заблокировано/провалено — бот не вмешивается
+        if deal.status == Status.ESCALATED_POSITIVE:
+            await _answer_faq_after_positive(deal_id, deal, text)
+        return  # уже эскалировано/заблокировано/провалено — полный цикл бота дальше не идёт
 
     if not repo.try_lock(deal_id):
         for _ in range(_LOCK_RETRY_ATTEMPTS):
@@ -270,7 +357,15 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
             )
             return
 
-    repo.log_event(deal_id, "in", channel.value, text)
+    if not await _log_event_with_retries(deal_id, "in", channel.value, text):
+        logger.warning(
+            "Сделка %s: не удалось зафиксировать входящее сообщение — сделка разблокирована для "
+            "повторной попытки: %r",
+            deal_id,
+            text[:200],
+        )
+        repo.unlock(deal_id)
+        return
 
     try:
         await asyncio.to_thread(amo_actions.move_to_clarification, deal_id)
@@ -323,7 +418,17 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
                     "Сделка %s: не удалось создать задачу Варваре по авто-ответу FAQ", deal_id
                 )
 
-            cycle_count = repo.restart_reminder_cycle(deal_id, timeutils.next_reminder_at_iso())
+            cycle_count = await _restart_reminder_cycle_with_retries(
+                deal_id, timeutils.next_reminder_at_iso()
+            )
+            if cycle_count is None:
+                logger.warning(
+                    "Сделка %s: не удалось зафиксировать restart_reminder_cycle — сделка "
+                    "разблокирована для повторной попытки",
+                    deal_id,
+                )
+                repo.unlock(deal_id)
+                return
             if cycle_count < _FAQ_CYCLE_CAP:
                 return
             # Предел повторов исчерпан (P-020) — принудительно эскалируем. Клиенту уже отправлен
@@ -344,7 +449,7 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
             "не обработано, сделка разблокирована для повторной попытки",
             deal_id,
             new_status,
-            _ESCALATE_RETRY_ATTEMPTS,
+            _DB_WRITE_RETRY_ATTEMPTS,
         )
         repo.unlock(deal_id)
         return
