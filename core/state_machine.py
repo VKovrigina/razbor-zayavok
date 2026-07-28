@@ -102,16 +102,33 @@ async def process_new_deal(deal_id: int) -> None:
       закрывающий вопрос "Хотите что-то добавить?".
 
     Сразу после отправки сделка переводится на этап 'Первичные переговоры' — независимо от того,
-    ответит клиент или нет (не дожидаемся ответа, в отличие от предыдущей версии сценария)."""
+    ответит клиент или нет (не дожидаемся ответа, в отличие от предыдущей версии сценария).
+
+    Подготовка сообщения (чек-листы + шаблон, до попытки отправки) обёрнута в try/except: сбой
+    здесь означает, что клиенту ТОЧНО ничего не ушло (в отличие от сбоя после отправки), поэтому
+    безопасно сразу пометить сделку FAILED и завести задачу Варваре — иначе сделка осталась бы в
+    `NEW` навсегда, никем не подхватываемая повторно (P-016 в BACKLOG.md, реализовался как P-036)."""
     deal = repo.get_deal(deal_id)
     if deal is None:
         return
 
-    missing = checklist.assess(deal.stack_text, deal.case_text)
-    topic_questions = checklist.assess_topic(deal.stack_text, deal.case_text)
-    text = templates.first_message(
-        deal.contact_name, deal.stack_text, deal.case_text, missing, topic_questions
-    )
+    try:
+        missing = checklist.assess(deal.stack_text, deal.case_text)
+        topic_questions = checklist.assess_topic(deal.stack_text, deal.case_text)
+        text = templates.first_message(
+            deal.contact_name, deal.stack_text, deal.case_text, missing, topic_questions
+        )
+    except Exception:
+        logger.exception("Сделка %s: не удалось подготовить первое сообщение", deal_id)
+        repo.mark_failed(deal_id, templates.TASK_TEXT_PREP_FAILED)
+        try:
+            await asyncio.to_thread(
+                amo_actions.create_manager_task, deal_id, templates.TASK_TEXT_PREP_FAILED
+            )
+        except Exception:
+            logger.exception("Сделка %s: не удалось создать задачу на Варвару", deal_id)
+        return
+
     sent = await _send_first_contact(deal_id, deal, text)
     if sent is None:
         return

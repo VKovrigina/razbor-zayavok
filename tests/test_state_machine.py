@@ -122,3 +122,66 @@ def test_faq_no_match_behaves_as_before(repo, monkeypatch):
     assert deal.faq_cycle_count == 0
     assert sent_messages == [state_machine.templates.REPLY_AMBIGUOUS]
     assert manager_tasks[-1][1] == state_machine.templates.TASK_TEXT_CLARIFICATION
+
+
+def _make_new_deal(repo, deal_id: int):
+    repo.create_deal_new(deal_id, 900 + deal_id, "Клиент", "client_test", None, "amoCRM", "Кейс")
+
+
+def _process_new_deal(deal_id: int):
+    asyncio.run(state_machine.process_new_deal(deal_id))
+
+
+def _patch_first_contact_success(monkeypatch):
+    monkeypatch.setattr(state_machine.amo_actions, "move_to_negotiations", lambda deal_id: None)
+
+    async def fake_send_first_contact(username, text):
+        return 12345
+
+    monkeypatch.setattr(state_machine.telegram_sender, "send_first_contact", fake_send_first_contact)
+
+
+def test_process_new_deal_happy_path_sends_and_advances(repo, monkeypatch):
+    _patch_first_contact_success(monkeypatch)
+    _make_new_deal(repo, 10)
+
+    _process_new_deal(10)
+
+    deal = repo.get_deal(10)
+    assert deal.status == Status.AWAITING_REPLY_1
+    assert deal.channel == Channel.TELEGRAM
+
+
+def test_process_new_deal_prep_failure_marks_failed_without_sending(repo, monkeypatch):
+    """P-016: сбой ДО отправки (чек-лист/шаблон) не должен оставлять сделку навсегда в NEW —
+    сразу FAILED + задача Варваре, сообщение клиенту не отправляется вовсе."""
+    _patch_first_contact_success(monkeypatch)
+    _make_new_deal(repo, 11)
+
+    def failing_assess(stack_text, case_text):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(state_machine.checklist, "assess", failing_assess)
+
+    send_first_contact_called = False
+
+    async def should_not_be_called(username, text):
+        nonlocal send_first_contact_called
+        send_first_contact_called = True
+        return 12345
+
+    monkeypatch.setattr(state_machine.telegram_sender, "send_first_contact", should_not_be_called)
+
+    manager_tasks = []
+    monkeypatch.setattr(
+        state_machine.amo_actions,
+        "create_manager_task",
+        lambda deal_id, text: manager_tasks.append((deal_id, text)),
+    )
+
+    _process_new_deal(11)
+
+    deal = repo.get_deal(11)
+    assert deal.status == Status.FAILED
+    assert send_first_contact_called is False
+    assert manager_tasks == [(11, state_machine.templates.TASK_TEXT_PREP_FAILED)]
