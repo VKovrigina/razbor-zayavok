@@ -133,3 +133,16 @@ def test_blocked_deal_not_reopenable_via_conflict_check(repo):
 
     conflict = repo.find_conflicting_active_deal("galina_test", None, exclude_deal_id=10)
     assert conflict is None  # BLOCKED — не активная, не считается конфликтом для будущих сделок
+
+
+def test_create_deal_new_initializes_messaging_tariff_flagged_to_false(repo):
+    repo.create_deal_new(43, 400, "Анна", "anna_test", None, "amoCRM", "Кейс 4")
+    assert repo.get_deal(43).messaging_tariff_flagged is False
+
+
+def test_set_messaging_tariff_flagged_updates_value(repo):
+    repo.create_deal_new(44, 400, "Анна", "anna_test", None, "amoCRM", "Кейс 4")
+
+    repo.set_messaging_tariff_flagged(44, True)
+
+    assert repo.get_deal(44).messaging_tariff_flagged is True

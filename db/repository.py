@@ -32,6 +32,7 @@ def init_db() -> None:
     with _connect() as conn:
         conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
         _migrate_add_faq_cycle_count(conn)
+        _migrate_add_messaging_tariff_flag(conn)
 
 
 def _migrate_add_faq_cycle_count(conn: sqlite3.Connection) -> None:
@@ -41,6 +42,16 @@ def _migrate_add_faq_cycle_count(conn: sqlite3.Connection) -> None:
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(deals)")}
     if "faq_cycle_count" not in columns:
         conn.execute("ALTER TABLE deals ADD COLUMN faq_cycle_count INTEGER NOT NULL DEFAULT 0")
+
+
+def _migrate_add_messaging_tariff_flag(conn: sqlite3.Connection) -> None:
+    """Как и `_migrate_add_faq_cycle_count` — на боевой БД, созданной до появления этой колонки,
+    её не будет без явного ALTER TABLE (P-052 в BACKLOG.md)."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(deals)")}
+    if "messaging_tariff_flagged" not in columns:
+        conn.execute(
+            "ALTER TABLE deals ADD COLUMN messaging_tariff_flagged INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +233,16 @@ def set_telegram_peer_id(deal_id: int, peer_id: int) -> None:
         conn.execute(
             "UPDATE deals SET telegram_peer_id = ?, updated_at = ? WHERE deal_id = ?",
             (peer_id, now_iso(), deal_id),
+        )
+
+
+def set_messaging_tariff_flagged(deal_id: int, value: bool) -> None:
+    """Помечает сделку как требующую отдельного тарифа на 'операции' (работа с сообщениями) —
+    см. core/state_machine.py: process_new_deal / handle_incoming_reply, P-052 в BACKLOG.md."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE deals SET messaging_tariff_flagged = ?, updated_at = ? WHERE deal_id = ?",
+            (int(value), now_iso(), deal_id),
         )
 
 

@@ -35,6 +35,7 @@ def _patch_common(monkeypatch):
     monkeypatch.setattr(
         state_machine.classify_client, "classify_sync", lambda text, case: ReplyCategory.AMBIGUOUS
     )
+    monkeypatch.setattr(state_machine.checklist, "mentions_messaging_work", lambda text: False)
 
     sent_messages = []
 
@@ -124,6 +125,85 @@ def test_faq_no_match_behaves_as_before(repo, monkeypatch):
     assert manager_tasks[-1][1] == state_machine.templates.TASK_TEXT_CLARIFICATION
 
 
+def test_positive_reply_with_addition_includes_it_in_note_and_field(repo, monkeypatch):
+    """Полное ТЗ пишется дважды (примечание для Варвары + custom-поле для "Выдача кейсов к
+    группу") одним и тем же текстом; содержательный ответ клиента добавляется строкой
+    "Дополнение: ..."."""
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        state_machine.classify_client, "classify_sync", lambda text, case: ReplyCategory.POSITIVE
+    )
+    monkeypatch.setattr(state_machine.checklist, "describes_addition_to_case", lambda text: True)
+
+    note_calls = []
+    monkeypatch.setattr(
+        state_machine.amo_actions, "add_note", lambda deal_id, text: note_calls.append((deal_id, text))
+    )
+    field_calls = []
+    monkeypatch.setattr(
+        state_machine.amo_actions,
+        "set_full_spec_field",
+        lambda deal_id, text: field_calls.append((deal_id, text)),
+    )
+
+    _make_deal_awaiting_reply(repo, 40)
+
+    _handle(40, "Да, ещё нужно передавать статусы заказов")
+
+    deal = repo.get_deal(40)
+    assert deal.status == Status.ESCALATED_POSITIVE
+    assert len(note_calls) == 1
+    assert "Дополнение: Да, ещё нужно передавать статусы заказов" in note_calls[0][1]
+    assert field_calls == note_calls  # тот же текст уходит в оба места
+
+
+def test_positive_reply_bare_agreement_excludes_addition_line(repo, monkeypatch):
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        state_machine.classify_client, "classify_sync", lambda text, case: ReplyCategory.POSITIVE
+    )
+    monkeypatch.setattr(state_machine.checklist, "describes_addition_to_case", lambda text: False)
+
+    note_calls = []
+    monkeypatch.setattr(
+        state_machine.amo_actions, "add_note", lambda deal_id, text: note_calls.append((deal_id, text))
+    )
+    field_calls = []
+    monkeypatch.setattr(
+        state_machine.amo_actions,
+        "set_full_spec_field",
+        lambda deal_id, text: field_calls.append((deal_id, text)),
+    )
+
+    _make_deal_awaiting_reply(repo, 41)
+
+    _handle(41, "да, жду")
+
+    assert "Дополнение" not in note_calls[0][1]
+    assert field_calls == note_calls
+
+
+def test_positive_reply_full_spec_field_failure_does_not_block_escalation(repo, monkeypatch):
+    manager_tasks, sent_messages = _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        state_machine.classify_client, "classify_sync", lambda text, case: ReplyCategory.POSITIVE
+    )
+    monkeypatch.setattr(state_machine.checklist, "describes_addition_to_case", lambda text: False)
+
+    def failing_set_full_spec_field(deal_id, text):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(state_machine.amo_actions, "set_full_spec_field", failing_set_full_spec_field)
+
+    _make_deal_awaiting_reply(repo, 42)
+
+    _handle(42, "да")
+
+    deal = repo.get_deal(42)
+    assert deal.status == Status.ESCALATED_POSITIVE
+    assert sent_messages == [state_machine.templates.REPLY_POSITIVE]
+
+
 def _make_new_deal(repo, deal_id: int):
     repo.create_deal_new(deal_id, 900 + deal_id, "Клиент", "client_test", None, "amoCRM", "Кейс")
 
@@ -135,24 +215,54 @@ def _process_new_deal(deal_id: int):
 def _patch_first_contact_success(monkeypatch):
     """Полностью детерминированная подготовка + отправка — без единого реального сетевого вызова
     (ни Anthropic, ни amoCRM, ни Telegram), чтобы тест не зависел от сети/квоты и не полз в
-    реальный `mark_failed`+`create_manager_task` при случайной заминке внешнего API."""
+    реальный `mark_failed`+`create_manager_task` при случайной заминке внешнего API. Возвращает
+    список вызовов `set_channel_tag` для проверки."""
     monkeypatch.setattr(state_machine.checklist, "assess", lambda stack_text, case_text: [])
     monkeypatch.setattr(state_machine.checklist, "assess_topic", lambda stack_text, case_text: [])
+    monkeypatch.setattr(state_machine.checklist, "mentions_messaging_work", lambda case_text: False)
     monkeypatch.setattr(state_machine.amo_actions, "move_to_negotiations", lambda deal_id: None)
+
+    channel_tag_calls = []
+    monkeypatch.setattr(
+        state_machine.amo_actions,
+        "set_channel_tag",
+        lambda deal_id, channel_value: channel_tag_calls.append((deal_id, channel_value)),
+    )
 
     async def fake_send_first_contact(username, text):
         return 12345
 
     monkeypatch.setattr(state_machine.telegram_sender, "send_first_contact", fake_send_first_contact)
 
+    return channel_tag_calls
+
 
 def test_process_new_deal_happy_path_sends_and_advances(repo, monkeypatch):
-    _patch_first_contact_success(monkeypatch)
+    channel_tag_calls = _patch_first_contact_success(monkeypatch)
     _make_new_deal(repo, 10)
 
     _process_new_deal(10)
 
     deal = repo.get_deal(10)
+    assert deal.status == Status.AWAITING_REPLY_1
+    assert deal.channel == Channel.TELEGRAM
+    assert channel_tag_calls == [(10, "telegram")]
+
+
+def test_process_new_deal_channel_tag_failure_does_not_block_deal(repo, monkeypatch):
+    """Тег канала — best-effort для соседнего проекта "Выдача кейсов к группу", не должен
+    мешать основному сценарию, если amoCRM недоступен именно на этом шаге."""
+    _patch_first_contact_success(monkeypatch)
+    _make_new_deal(repo, 12)
+
+    def failing_set_channel_tag(deal_id, channel_value):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(state_machine.amo_actions, "set_channel_tag", failing_set_channel_tag)
+
+    _process_new_deal(12)
+
+    deal = repo.get_deal(12)
     assert deal.status == Status.AWAITING_REPLY_1
     assert deal.channel == Channel.TELEGRAM
 
@@ -294,3 +404,199 @@ def test_other_escalated_statuses_remain_fully_silent(repo, monkeypatch):
     assert repo.get_deal(32).status == Status.ESCALATED_NEGATIVE
     assert sent_messages == []
     assert manager_tasks == []
+
+
+# --- Предупреждение о тарифе на "операции" (работа с сообщениями), P-052 ---
+
+def test_process_new_deal_messaging_work_detected_sends_second_message_and_flags(repo, monkeypatch):
+    _patch_first_contact_success(monkeypatch)
+    monkeypatch.setattr(state_machine.checklist, "mentions_messaging_work", lambda case_text: True)
+
+    first_contact_texts = []
+
+    async def fake_send_first_contact(username, text):
+        first_contact_texts.append(text)
+        return 12345
+
+    monkeypatch.setattr(state_machine.telegram_sender, "send_first_contact", fake_send_first_contact)
+
+    sent_replies = []
+
+    async def fake_send_reply(peer_id, text):
+        sent_replies.append(text)
+
+    monkeypatch.setattr(state_machine.telegram_sender, "send_reply", fake_send_reply)
+
+    tag_calls = []
+    monkeypatch.setattr(
+        state_machine.amo_actions,
+        "set_messaging_tariff_tag",
+        lambda deal_id: tag_calls.append(deal_id),
+    )
+
+    _make_new_deal(repo, 13)
+
+    _process_new_deal(13)
+
+    deal = repo.get_deal(13)
+    assert deal.status == Status.AWAITING_REPLY_1
+    assert deal.messaging_tariff_flagged is True
+    assert tag_calls == [13]
+    assert sent_replies == [state_machine.templates.MESSAGING_TARIFF_WARNING]
+    assert len(first_contact_texts) == 1
+    assert state_machine.templates.MESSAGING_TARIFF_CLOSING_NOTE in first_contact_texts[0]
+
+
+def test_process_new_deal_no_messaging_work_sends_only_first_message(repo, monkeypatch):
+    _patch_first_contact_success(monkeypatch)  # mentions_messaging_work по умолчанию False
+    tag_calls = []
+    monkeypatch.setattr(
+        state_machine.amo_actions,
+        "set_messaging_tariff_tag",
+        lambda deal_id: tag_calls.append(deal_id),
+    )
+    send_reply_called = False
+
+    async def should_not_be_called(peer_id, text):
+        nonlocal send_reply_called
+        send_reply_called = True
+
+    monkeypatch.setattr(state_machine.telegram_sender, "send_reply", should_not_be_called)
+
+    _make_new_deal(repo, 14)
+
+    _process_new_deal(14)
+
+    deal = repo.get_deal(14)
+    assert deal.messaging_tariff_flagged is False
+    assert tag_calls == []
+    assert send_reply_called is False
+
+
+def test_process_new_deal_messaging_warning_send_failure_does_not_block_first_message(repo, monkeypatch):
+    _patch_first_contact_success(monkeypatch)
+    monkeypatch.setattr(state_machine.checklist, "mentions_messaging_work", lambda case_text: True)
+
+    first_contact_texts = []
+
+    async def fake_send_first_contact(username, text):
+        first_contact_texts.append(text)
+        return 12345
+
+    monkeypatch.setattr(state_machine.telegram_sender, "send_first_contact", fake_send_first_contact)
+
+    async def failing_send_reply(peer_id, text):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(state_machine.telegram_sender, "send_reply", failing_send_reply)
+
+    _make_new_deal(repo, 15)
+
+    _process_new_deal(15)
+
+    deal = repo.get_deal(15)
+    assert deal.status == Status.AWAITING_REPLY_1  # первое сообщение всё равно ушло
+    assert len(first_contact_texts) == 1
+    assert deal.messaging_tariff_flagged is True  # флаг — независимый best-effort шаг
+
+
+def test_late_messaging_mention_sends_warning_and_waits_without_classifying(repo, monkeypatch):
+    manager_tasks, sent_messages = _patch_common(monkeypatch)
+    monkeypatch.setattr(state_machine.checklist, "mentions_messaging_work", lambda text: True)
+
+    classify_called = False
+
+    def should_not_be_called(text, case):
+        nonlocal classify_called
+        classify_called = True
+        return ReplyCategory.AMBIGUOUS
+
+    monkeypatch.setattr(state_machine.classify_client, "classify_sync", should_not_be_called)
+
+    tag_calls = []
+    monkeypatch.setattr(
+        state_machine.amo_actions,
+        "set_messaging_tariff_tag",
+        lambda deal_id: tag_calls.append(deal_id),
+    )
+
+    _make_deal_awaiting_reply(repo, 22)
+
+    _handle(22, "а можно ещё, чтобы ИИ агент отвечал клиентам?")
+
+    deal = repo.get_deal(22)
+    assert deal.messaging_tariff_flagged is True
+    assert tag_calls == [22]
+    assert sent_messages == [state_machine.templates.MESSAGING_TARIFF_WARNING]
+    assert classify_called is False
+    assert deal.status == Status.AWAITING_REPLY_1  # не эскалировано, ждём отдельный ответ
+    assert deal.in_progress is False
+    assert manager_tasks == []
+
+
+def _make_deal_awaiting_reply_flagged(repo, deal_id: int):
+    _make_deal_awaiting_reply(repo, deal_id)
+    repo.set_messaging_tariff_flagged(deal_id, True)
+
+
+def test_messaging_flagged_positive_reply_creates_extra_manager_task(repo, monkeypatch):
+    manager_tasks, sent_messages = _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        state_machine.classify_client, "classify_sync", lambda text, case: ReplyCategory.POSITIVE
+    )
+    monkeypatch.setattr(state_machine.checklist, "describes_addition_to_case", lambda text: False)
+    _make_deal_awaiting_reply_flagged(repo, 23)
+
+    _handle(23, "да, готовы")
+
+    deal = repo.get_deal(23)
+    assert deal.status == Status.ESCALATED_POSITIVE
+    task_texts = [t for _, t in manager_tasks]
+    assert state_machine.templates.TASK_TEXT_FINALIZE_SPEC in task_texts
+    assert state_machine.templates.TASK_TEXT_MESSAGING_POSITIVE in task_texts
+    assert state_machine.templates.MESSAGING_TARIFF_WARNING not in sent_messages  # не дублируем
+
+
+def test_messaging_flagged_negative_reply_creates_extra_manager_task(repo, monkeypatch):
+    manager_tasks, sent_messages = _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        state_machine.classify_client, "classify_sync", lambda text, case: ReplyCategory.NEGATIVE
+    )
+    _make_deal_awaiting_reply_flagged(repo, 24)
+
+    _handle(24, "нет, не готовы по такой цене")
+
+    deal = repo.get_deal(24)
+    assert deal.status == Status.ESCALATED_NEGATIVE
+    task_texts = [t for _, t in manager_tasks]
+    assert state_machine.templates.TASK_TEXT_NEGATIVE_CLIENT in task_texts
+    assert state_machine.templates.TASK_TEXT_MESSAGING_NEGATIVE in task_texts
+    # Отказ именно от тарифа на сообщения — мягкий ответ, а не обычный REPLY_NEGATIVE.
+    assert sent_messages == [state_machine.templates.REPLY_MESSAGING_NEGATIVE]
+
+
+def test_negative_reply_without_messaging_flag_uses_standard_reply(repo, monkeypatch):
+    manager_tasks, sent_messages = _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        state_machine.classify_client, "classify_sync", lambda text, case: ReplyCategory.NEGATIVE
+    )
+    _make_deal_awaiting_reply(repo, 26)  # не помечена флагом
+
+    _handle(26, "неактуально, отбой")
+
+    assert sent_messages == [state_machine.templates.REPLY_NEGATIVE]
+
+
+def test_messaging_not_flagged_no_extra_manager_task(repo, monkeypatch):
+    manager_tasks, sent_messages = _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        state_machine.classify_client, "classify_sync", lambda text, case: ReplyCategory.POSITIVE
+    )
+    monkeypatch.setattr(state_machine.checklist, "describes_addition_to_case", lambda text: False)
+    _make_deal_awaiting_reply(repo, 25)  # не помечена флагом
+
+    _handle(25, "да, готовы")
+
+    task_texts = [t for _, t in manager_tasks]
+    assert state_machine.templates.TASK_TEXT_MESSAGING_POSITIVE not in task_texts
+    assert state_machine.templates.TASK_TEXT_MESSAGING_NEGATIVE not in task_texts

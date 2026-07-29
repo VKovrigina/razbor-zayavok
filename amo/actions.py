@@ -103,3 +103,28 @@ def add_note(lead_id: int, text: str) -> None:
 def create_manager_task(lead_id: int, text: str, due_in_hours: int = 1) -> None:
     complete_till = int(time.time()) + due_in_hours * 3600
     amo_client.create_task(lead_id, settings.amocrm_varvara_user_id, text, complete_till)
+
+
+# Теги канала связи — читаются проектом "Выдача кейсов к группу" при передаче контакта клиента
+# партнёру (см. его Логика ИИ агента.md, разд. 4). Названия зафиксированы в BACKLOG.md P1-06
+# этого проекта.
+_CHANNEL_TAG_NAMES = {"telegram": "ТГ", "email": "Почта"}
+
+
+def set_channel_tag(lead_id: int, channel_value: str) -> None:
+    """Ставит тег фактического канала связи с клиентом (см. core/state_machine.py:
+    process_new_deal, вызывается сразу после финализации канала)."""
+    amo_client.add_lead_tag(lead_id, _CHANNEL_TAG_NAMES[channel_value])
+
+
+def set_full_spec_field(lead_id: int, text: str) -> None:
+    """Записывает собранный текст ТЗ в custom-поле «Полное ТЗ» — источник для проекта "Выдача
+    кейсов к группу", который публикует это поле дословно партнёрам (см. core/state_machine.py:
+    handle_incoming_reply, ветка POSITIVE)."""
+    amo_client.set_lead_custom_field(lead_id, settings.amocrm_field_id_full_spec, text)
+
+
+def set_messaging_tariff_tag(lead_id: int) -> None:
+    """Ставит тег 'Месседжинг' — сделке требуется отдельный тариф на 'операции' (работа с
+    сообщениями), см. core/state_machine.py: process_new_deal / handle_incoming_reply (P-052)."""
+    amo_client.add_lead_tag(lead_id, "Месседжинг")

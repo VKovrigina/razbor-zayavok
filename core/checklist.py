@@ -254,3 +254,150 @@ def assess_topic(stack_text: str | None, case_text: str | None) -> list[str]:
             return [text for cid, text in criteria if cid in missing_ids]
     logger.warning("assess_topic: Claude не вернул tool_use, тема не определена")
     return []
+
+
+# ---------------------------------------------------------------------------
+# Дополнение к задаче при позитивном ответе — отличаем содержательное уточнение от голого
+# согласия ("да"/"жду"/"хорошо"), см. core/state_machine.py: handle_incoming_reply.
+# ---------------------------------------------------------------------------
+
+_ADDITION_TOOL = {
+    "name": "assess_addition",
+    "description": (
+        "Оценить, добавляет ли ответ клиента что-то по существу к описанию задачи, или это "
+        "просто согласие продолжить без новой информации."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "adds_information": {
+                "type": "boolean",
+                "description": (
+                    "true, если в ответе клиента есть новые детали/уточнения по задаче; false, "
+                    "если это просто согласие/подтверждение без новой информации (например "
+                    "«да», «хорошо», «жду», «согласен», «спасибо»)"
+                ),
+            }
+        },
+        "required": ["adds_information"],
+    },
+}
+
+_ADDITION_SYSTEM_PROMPT = """Ты помогаешь понять, добавляет ли ответ клиента что-то по существу к
+описанию задачи в партнёрском отделе Альбато. Тебе дан текст ответа клиента на вопрос "готовы
+передать задачу партнёрам на оценку?". Верни true, если в ответе есть НОВАЯ информация по задаче
+(уточнение деталей, дополнительное условие, изменение требований). Верни false, если это просто
+согласие продолжить без новой информации ("да", "хорошо", "давайте", "жду", "спасибо",
+"согласен")."""
+
+
+def describes_addition_to_case(text: str | None) -> bool:
+    """Отличает содержательное дополнение к задаче от голого согласия ("да"/"жду"/"хорошо") —
+    используется в handle_incoming_reply при позитивном ответе клиента, чтобы не засорять
+    примечание и поле "Полное ТЗ" (видит партнёр в проекте "Выдача кейсов к группу")
+    бессмысленными репликами. Безопасный дефолт при любой неопределённости — False (не добавлять)."""
+    if not text or not text.strip():
+        return False
+    if not settings.anthropic_api_key:
+        return len(text.strip()) >= 15  # тот же грубый фолбэк, что у _case_describes_problem_or_data
+
+    response = _client.messages.create(
+        model=settings.anthropic_model,
+        max_tokens=100,
+        system=_ADDITION_SYSTEM_PROMPT,
+        tools=[_ADDITION_TOOL],
+        tool_choice={"type": "tool", "name": "assess_addition"},
+        messages=[{"role": "user", "content": f"Ответ клиента:\n{text}"}],
+    )
+    for block in response.content:
+        if block.type == "tool_use" and block.name == "assess_addition":
+            value = block.input.get("adds_information")
+            if value is None:
+                logger.warning(
+                    "assess_addition: ответ модели без обязательного поля, считаем что дополнения нет"
+                )
+                return False
+            return bool(value)
+    logger.warning("assess_addition: Claude не вернул tool_use, считаем что дополнения нет")
+    return False
+
+
+_MESSAGING_TOOL = {
+    "name": "assess_messaging_work",
+    "description": (
+        "Оценить, есть ли в описании задачи клиента признаки работы с сообщениями (месседжинг): "
+        "мессенджеры, чаты в сервисах, ИИ-ответы на сообщения, работа с отзывами. Автоматизация "
+        "звонков/телефонии сама по себе месседжингом НЕ считается."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "mentions_messaging": {
+                "type": "boolean",
+                "description": (
+                    "true, если есть хотя бы один признак: 1) использование мессенджеров "
+                    "(Telegram/WhatsApp/Viber и т.п.) как канала связи с клиентом; "
+                    "2) использование чатов внутри сервисов (чат на сайте, встроенный чат CRM); "
+                    "3) использование ИИ для ответа на сообщения клиентам; 4) работа с отзывами "
+                    "(сбор/обработка/автоответ). false в остальных случаях — в том числе для "
+                    "автоматизации звонков/телефонии (например Манго Офис/Talker) и смены статуса "
+                    "сделки по исходу звонка: звонок — не сообщение"
+                ),
+            }
+        },
+        "required": ["mentions_messaging"],
+    },
+}
+
+_MESSAGING_SYSTEM_PROMPT = """Ты помогаешь понять, нужна ли клиенту партнёрского отдела Альбато
+работа с сообщениями (месседжинг) — это отдельно тарифицируется. Тебе дан текст задачи клиента.
+
+Верни true, ТОЛЬКО если в задаче есть хотя бы один из следующих признаков:
+1) Использование мессенджеров (Telegram, WhatsApp, Viber и т.п.) как канала связи с клиентом —
+   отправка/приём сообщений через мессенджер.
+2) Использование чатов внутри сервисов (чат на сайте, встроенный чат CRM/сервиса и т.п.).
+3) Использование ИИ для ответа на сообщения клиентам (опциональный признак — усиливает пункты
+   1/2, но сам по себе, без мессенджера/чата, недостаточен).
+4) Работа с отзывами (сбор, обработка, автоматический ответ на отзывы).
+
+Верни false во всех остальных случаях — в том числе если автоматизация просто связывает системы
+без переписки с клиентом: например, автоматизация ЗВОНКОВ через телефонию (Манго Офис/Talker и
+т.п.), смена статуса сделки в CRM по исходу звонка, обычная синхронизация данных/CRM/таблиц/счетов.
+Звонок — это НЕ сообщение и НЕ месседжинг, даже если он инициируется автоматически по событию в
+CRM."""
+
+
+def mentions_messaging_work(case_text: str | None) -> bool:
+    """Определяет, нужно ли предупредить клиента о тарифе на 'операции' (работа с сообщениями) —
+    см. core/state_machine.py: process_new_deal и templates.MESSAGING_TARIFF_WARNING. Критерии
+    (нужен хотя бы один): 1) мессенджеры как канал связи с клиентом; 2) чаты внутри сервисов;
+    3) ИИ отвечает на сообщения (опционально, усиливает 1/2); 4) работа с отзывами. НЕ считается
+    месседжингом автоматизация звонков/телефонии (Манго Офис/Talker и т.п.) — звонок не сообщение
+    (уточнено 2026-07-29, P-054, после ложного срабатывания на кейсе с Mango Talker). Безопасный
+    дефолт при любой неопределённости — False (не предупреждать зря). В отличие от
+    describes_addition_to_case, без API-ключа фолбэк тоже False (не эвристика по длине) — ложное
+    срабатывание показало бы клиенту пугающий текст про тариф без причины."""
+    if not case_text or not case_text.strip():
+        return False
+    if not settings.anthropic_api_key:
+        return False
+
+    response = _client.messages.create(
+        model=settings.anthropic_model,
+        max_tokens=100,
+        system=_MESSAGING_SYSTEM_PROMPT,
+        tools=[_MESSAGING_TOOL],
+        tool_choice={"type": "tool", "name": "assess_messaging_work"},
+        messages=[{"role": "user", "content": f"Задача клиента:\n{case_text}"}],
+    )
+    for block in response.content:
+        if block.type == "tool_use" and block.name == "assess_messaging_work":
+            value = block.input.get("mentions_messaging")
+            if value is None:
+                logger.warning(
+                    "assess_messaging_work: ответ без обязательного поля, считаем что не про сообщения"
+                )
+                return False
+            return bool(value)
+    logger.warning("assess_messaging_work: Claude не вернул tool_use, считаем что не про сообщения")
+    return False

@@ -96,5 +96,26 @@ class AmoClient:
         ]
         return self.post("/api/v4/leads/notes", payload)
 
+    def add_lead_tag(self, lead_id: int, tag_name: str) -> None:
+        """Добавляет тег к сделке, СОХРАНЯЯ уже существующие — PATCH .../leads/{id} с
+        _embedded.tags заменяет весь список тегов целиком (задокументированное поведение amoCRM
+        API v4), поэтому сначала читаем текущие теги и объединяем. Идемпотентно — если тег уже
+        стоит, ничего не отправляет."""
+        lead = self.get_lead(lead_id)
+        existing = (lead.get("_embedded") or {}).get("tags") or []
+        if any(t.get("name") == tag_name for t in existing):
+            return
+        tags_payload = [{"id": t["id"]} for t in existing if t.get("id")] + [{"name": tag_name}]
+        self.patch(f"/api/v4/leads/{lead_id}", {"_embedded": {"tags": tags_payload}})
+
+    def set_lead_custom_field(self, lead_id: int, field_id: int, value: str) -> None:
+        """Обновляет ОДНО custom-поле сделки. В отличие от `_embedded.tags` (см. `add_lead_tag`),
+        `custom_fields_values` в PATCH обновляет только перечисленные поля — остальные custom-поля
+        сделки не затрагиваются, поэтому текущее значение читать не нужно."""
+        self.patch(
+            f"/api/v4/leads/{lead_id}",
+            {"custom_fields_values": [{"field_id": field_id, "values": [{"value": value}]}]},
+        )
+
 
 amo_client = AmoClient()

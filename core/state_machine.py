@@ -108,7 +108,22 @@ async def process_new_deal(deal_id: int) -> None:
     Подготовка сообщения (чек-листы + шаблон, до попытки отправки) обёрнута в try/except: сбой
     здесь означает, что клиенту ТОЧНО ничего не ушло (в отличие от сбоя после отправки), поэтому
     безопасно сразу пометить сделку FAILED и завести задачу Варваре — иначе сделка осталась бы в
-    `NEW` навсегда, никем не подхватываемая повторно (P-016 в BACKLOG.md, реализовался как P-036)."""
+    `NEW` навсегда, никем не подхватываемая повторно (P-016 в BACKLOG.md, реализовался как P-036).
+
+    Сразу после `set_awaiting_first_sent` на сделку ставится тег канала связи ('ТГ'/'Почта',
+    `amo_actions.set_channel_tag`) — сам этот проект его не читает, это подготовка для соседнего
+    проекта "Выдача кейсов к группу", которому нужен фактический канал при передаче контакта
+    клиента партнёру. Канал дальше не меняется до конца жизни сделки, так что момент верный.
+
+    Если `checklist.mentions_messaging_work(case_text)` находит в задаче работу с сообщениями
+    (ИИ-агент, автообработка отзывов, пересылка между системами) — обычный закрывающий вопрос в
+    первом сообщении заменяется на нейтральную фразу (`templates.MESSAGING_TARIFF_CLOSING_NOTE`),
+    а сразу вторым ОТДЕЛЬНЫМ сообщением уходит предупреждение о тарифе на 'операции'
+    (`templates.MESSAGING_TARIFF_WARNING`, со своим закрывающим вопросом). Сделка помечается
+    флагом `messaging_tariff_flagged` и тегом 'Месседжинг' (`amo_actions.set_messaging_tariff_tag`)
+    — флаг читает `handle_incoming_reply`, чтобы завести доп. задачу Варваре по ответу клиента
+    (P-052 в BACKLOG.md). То же самое (без второго сообщения этой функции) может произойти позже,
+    если клиент упомянет это только в переписке — см. `handle_incoming_reply`."""
     deal = repo.get_deal(deal_id)
     if deal is None:
         return
@@ -116,8 +131,18 @@ async def process_new_deal(deal_id: int) -> None:
     try:
         missing = checklist.assess(deal.stack_text, deal.case_text)
         topic_questions = checklist.assess_topic(deal.stack_text, deal.case_text)
+        messaging_flagged = await asyncio.to_thread(
+            checklist.mentions_messaging_work, deal.case_text
+        )
         text = templates.first_message(
-            deal.contact_name, deal.stack_text, deal.case_text, missing, topic_questions
+            deal.contact_name,
+            deal.stack_text,
+            deal.case_text,
+            missing,
+            topic_questions,
+            closing_question_override=(
+                templates.MESSAGING_TARIFF_CLOSING_NOTE if messaging_flagged else None
+            ),
         )
     except Exception:
         logger.exception("Сделка %s: не удалось подготовить первое сообщение", deal_id)
@@ -142,6 +167,31 @@ async def process_new_deal(deal_id: int) -> None:
     channel, peer_id = sent
     next_action_at = timeutils.next_reminder_at_iso()
     repo.set_awaiting_first_sent(deal_id, channel.value, peer_id, next_action_at)
+
+    try:
+        await asyncio.to_thread(amo_actions.set_channel_tag, deal_id, channel.value)
+    except Exception:
+        logger.exception("Сделка %s: не удалось поставить тег канала (%s)", deal_id, channel.value)
+
+    if messaging_flagged:
+        try:
+            repo.set_messaging_tariff_flagged(deal_id, True)
+        except Exception:
+            logger.exception("Сделка %s: не удалось сохранить флаг тарифа на сообщения", deal_id)
+        try:
+            await asyncio.to_thread(amo_actions.set_messaging_tariff_tag, deal_id)
+        except Exception:
+            logger.exception("Сделка %s: не удалось поставить тег 'Месседжинг'", deal_id)
+        try:
+            fresh_deal = repo.get_deal(deal_id)  # канал/peer_id теперь сохранены
+            await _send_via_channel(fresh_deal, templates.MESSAGING_TARIFF_WARNING)
+            repo.log_event(
+                deal_id, "out", fresh_deal.channel.value, templates.MESSAGING_TARIFF_WARNING
+            )
+        except Exception:
+            logger.exception(
+                "Сделка %s: не удалось отправить предупреждение о тарифе на сообщения", deal_id
+            )
 
 
 def _deal_in_reminder_eligible_stage(deal_id: int) -> bool:
@@ -305,8 +355,12 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
 
     Positive/negative, а также ambiguous без совпадения в базе знаний — сразу переводятся на этап
     'Ручная проверка' и на Варвару ставится задача (после этого бот больше не реагирует на
-    сообщения по этой сделке, см. INACTIVE_STATUSES). Если ответ positive — перед
-    переводом в сделку добавляется примечание с собранным ТЗ (см. `core/templates.py: spec_note`).
+    сообщения по этой сделке, см. INACTIVE_STATUSES). Если ответ positive — перед переводом в
+    сделку добавляется примечание с собранным ТЗ И записывается то же самое в custom-поле
+    «Полное ТЗ» (см. `core/templates.py: spec_note`, `amo_actions.set_full_spec_field`) — поле
+    читает соседний проект "Выдача кейсов к группу" при публикации кейса партнёрам. Ответ клиента
+    добавляется строкой "Дополнение: ..." только если `checklist.describes_addition_to_case`
+    решит, что это содержательное уточнение, а не голое согласие ("да"/"жду"/"хорошо").
 
     `repo.escalate` (см. `_escalate_with_retries`) вызывается ДО этих побочных эффектов, не после
     — если зафиксировать эскалацию так и не удастся, ничего из побочных эффектов ещё не произошло,
@@ -333,7 +387,23 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
     `ESCALATED_POSITIVE` — исключение среди `INACTIVE_STATUSES`: клиент уже согласился, ТЗ собрано
     и передано, но он может продолжать задавать вопросы. Такие сообщения не доходят до классификации
     и полного цикла выше — см. `_answer_faq_after_positive` (без закрывающего вопроса про оценку
-    кейса — он уже передан, и без новой задачи Варваре — человек уже в курсе)."""
+    кейса — он уже передан, и без новой задачи Варваре — человек уже в курсе).
+
+    Если сделка ещё НЕ помечена флагом `messaging_tariff_flagged` (см. `process_new_deal`), а
+    текущее входящее сообщение упоминает работу с сообщениями (`checklist.mentions_messaging_work`)
+    — это "позднее упоминание" (P-052 в BACKLOG.md): бот шлёт то же предупреждение о тарифе
+    (`templates.MESSAGING_TARIFF_WARNING`) отдельным сообщением, ставит флаг+тег 'Месседжинг' и
+    перезапускает цикл ожидания (`restart_reminder_cycle`, как в FAQ-ветке) — ТЕКУЩЕЕ сообщение НЕ
+    классифицируется как positive/negative/ambiguous, бот ждёт отдельный ответ именно на вопрос про
+    тариф. Флаг гарантирует, что это срабатывает не более одного раза за сделку.
+
+    Если сделка ПОМЕЧЕНА флагом (при создании или после позднего упоминания) — при классификации
+    ответа как positive/negative заводится ДОПОЛНИТЕЛЬНАЯ задача Варваре (`templates.
+    TASK_TEXT_MESSAGING_POSITIVE`/`TASK_TEXT_MESSAGING_NEGATIVE`) в дополнение к обычной задаче.
+    При negative-ответе клиенту при этом уходит не обычный `REPLY_NEGATIVE`, а более мягкий
+    `templates.REPLY_MESSAGING_NEGATIVE` ("Поняла вас, спасибо за ответ...") — это отказ конкретно
+    от условий тарифа на сообщения, а не общий негатив по заявке. Остальная эскалация (примечание/
+    этап/обычная задача) не меняется."""
     deal = repo.get_deal(deal_id)
     if deal is None:
         return
@@ -372,6 +442,51 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
     except Exception:
         logger.exception("Сделка %s: не удалось перевести на этап 'Уточнение ТЗ'", deal_id)
 
+    if not deal.messaging_tariff_flagged:
+        try:
+            messaging_flagged_now = await asyncio.to_thread(
+                checklist.mentions_messaging_work, text
+            )
+        except Exception:
+            logger.exception(
+                "Сделка %s: не удалось проверить упоминание работы с сообщениями", deal_id
+            )
+            messaging_flagged_now = False
+
+        if messaging_flagged_now:
+            try:
+                repo.set_messaging_tariff_flagged(deal_id, True)
+            except Exception:
+                logger.exception(
+                    "Сделка %s: не удалось сохранить флаг тарифа на сообщения", deal_id
+                )
+            try:
+                await asyncio.to_thread(amo_actions.set_messaging_tariff_tag, deal_id)
+            except Exception:
+                logger.exception("Сделка %s: не удалось поставить тег 'Месседжинг'", deal_id)
+            try:
+                await _send_via_channel(deal, templates.MESSAGING_TARIFF_WARNING)
+                repo.log_event(
+                    deal_id, "out", deal.channel.value, templates.MESSAGING_TARIFF_WARNING
+                )
+            except Exception:
+                logger.exception(
+                    "Сделка %s: не удалось отправить предупреждение о тарифе на сообщения",
+                    deal_id,
+                )
+
+            cycle_count = await _restart_reminder_cycle_with_retries(
+                deal_id, timeutils.next_reminder_at_iso()
+            )
+            if cycle_count is None:
+                logger.warning(
+                    "Сделка %s: не удалось зафиксировать restart_reminder_cycle после позднего "
+                    "предупреждения о тарифе — сделка разблокирована для повторной попытки",
+                    deal_id,
+                )
+            repo.unlock(deal_id)
+            return
+
     try:
         category = await asyncio.to_thread(classify_client.classify_sync, text, deal.case_text)
     except Exception:
@@ -383,7 +498,11 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
         task_text = templates.TASK_TEXT_FINALIZE_SPEC
         new_status = Status.ESCALATED_POSITIVE
     elif category == ReplyCategory.NEGATIVE:
-        reply_text = templates.REPLY_NEGATIVE
+        reply_text = (
+            templates.REPLY_MESSAGING_NEGATIVE
+            if deal.messaging_tariff_flagged
+            else templates.REPLY_NEGATIVE
+        )
         task_text = templates.TASK_TEXT_NEGATIVE_CLIENT
         new_status = Status.ESCALATED_NEGATIVE
     else:
@@ -455,12 +574,19 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
         return
 
     if category == ReplyCategory.POSITIVE:
-        case_with_reply = f"{deal.case_text or ''}\n\nОтвет клиента: {text}".strip()
-        note_text = templates.spec_note(deal.stack_text, case_with_reply)
+        if checklist.describes_addition_to_case(text):
+            case_with_addition = f"{deal.case_text or ''}\n\nДополнение: {text}".strip()
+        else:
+            case_with_addition = deal.case_text or ""
+        note_text = templates.spec_note(deal.stack_text, case_with_addition)
         try:
             await asyncio.to_thread(amo_actions.add_note, deal_id, note_text)
         except Exception:
             logger.exception("Сделка %s: не удалось добавить примечание с ТЗ", deal_id)
+        try:
+            await asyncio.to_thread(amo_actions.set_full_spec_field, deal_id, note_text)
+        except Exception:
+            logger.exception("Сделка %s: не удалось записать текст ТЗ в поле 'Полное ТЗ'", deal_id)
 
     if reply_text is not None:
         # None — только когда предел повторов FAQ-цикла исчерпан: клиенту уже отправлен ответ+
@@ -480,3 +606,19 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
         await asyncio.to_thread(amo_actions.create_manager_task, deal_id, task_text)
     except Exception:
         logger.exception("Сделка %s: не удалось создать задачу на Варвару", deal_id)
+
+    if deal.messaging_tariff_flagged and category in (
+        ReplyCategory.POSITIVE,
+        ReplyCategory.NEGATIVE,
+    ):
+        extra_task_text = (
+            templates.TASK_TEXT_MESSAGING_POSITIVE
+            if category == ReplyCategory.POSITIVE
+            else templates.TASK_TEXT_MESSAGING_NEGATIVE
+        )
+        try:
+            await asyncio.to_thread(amo_actions.create_manager_task, deal_id, extra_task_text)
+        except Exception:
+            logger.exception(
+                "Сделка %s: не удалось создать доп. задачу по тарифу на сообщения", deal_id
+            )

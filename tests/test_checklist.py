@@ -104,3 +104,40 @@ def test_topic_max_alone_without_bot_keyword_not_detected(monkeypatch):
 def test_assess_topic_empty_input_returns_no_topic(monkeypatch):
     _no_llm(monkeypatch)
     assert checklist.assess_topic(None, None) == []
+
+
+# --- describes_addition_to_case (отличаем содержательное дополнение от голого согласия) ---
+
+def test_describes_addition_empty_text_returns_false(monkeypatch):
+    _no_llm(monkeypatch)
+    assert checklist.describes_addition_to_case(None) is False
+    assert checklist.describes_addition_to_case("") is False
+    assert checklist.describes_addition_to_case("   ") is False
+
+
+def test_describes_addition_bare_agreement_returns_false_without_llm(monkeypatch):
+    _no_llm(monkeypatch)
+    assert checklist.describes_addition_to_case("да, жду") is False
+
+
+def test_describes_addition_substantial_text_returns_true_without_llm(monkeypatch):
+    _no_llm(monkeypatch)
+    text = "Да, дополнительно нужно ещё передавать статусы заказов из Bitrix24"
+    assert checklist.describes_addition_to_case(text) is True
+
+
+# --- mentions_messaging_work (предупреждение о тарифе на "операции", P-052) ---
+
+def test_mentions_messaging_empty_text_returns_false(monkeypatch):
+    _no_llm(monkeypatch)
+    assert checklist.mentions_messaging_work(None) is False
+    assert checklist.mentions_messaging_work("") is False
+    assert checklist.mentions_messaging_work("   ") is False
+
+
+def test_mentions_messaging_without_llm_key_returns_false(monkeypatch):
+    # В отличие от describes_addition_to_case, без API-ключа фолбэк не эвристика по длине, а
+    # всегда False — не гадаем, чтобы не пугать клиента тарифом зря.
+    _no_llm(monkeypatch)
+    text = "Хочу настроить ИИ-агента, который будет отвечать клиентам в Telegram и обрабатывать отзывы"
+    assert checklist.mentions_messaging_work(text) is False

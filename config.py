@@ -36,6 +36,9 @@ class Settings:
     amocrm_field_id_telegram: int | None = _int("AMOCRM_FIELD_ID_TELEGRAM")
     amocrm_field_id_stack: int | None = _int("AMOCRM_FIELD_ID_STACK")
     amocrm_field_id_case: int | None = _int("AMOCRM_FIELD_ID_CASE")
+    # "Полное ТЗ" — общее поле с проектом "Выдача кейсов к группу" (его AGENTS.md, P1-01):
+    # заполняется здесь при позитивном ответе клиента, читается там при публикации кейса партнёрам.
+    amocrm_field_id_full_spec: int | None = _int("AMOCRM_FIELD_ID_FULL_SPEC")
 
     amocrm_varvara_user_id: int | None = _int("AMOCRM_VARVARA_USER_ID")
 
@@ -83,6 +86,7 @@ class Settings:
             "amocrm_field_id_telegram",
             "amocrm_field_id_stack",
             "amocrm_field_id_case",
+            "amocrm_field_id_full_spec",
             "amocrm_varvara_user_id",
             "telegram_api_id",
             "telegram_api_hash",

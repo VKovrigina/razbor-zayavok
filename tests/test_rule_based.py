@@ -19,3 +19,12 @@ def test_clear_agreement_is_positive():
 
 def test_unclear_reply_defaults_to_ambiguous():
     assert classify_rule_based("хм ладно посмотрим") == ReplyCategory.AMBIGUOUS
+
+
+def test_soft_deferral_treated_as_negative():
+    """Мягкие отказы без "неактуально" — клиент откладывает без объяснения причины, это
+    считается отказом (negative), а не неоднозначным ответом."""
+    assert classify_rule_based("Пока нет") == ReplyCategory.NEGATIVE
+    assert classify_rule_based("Не сейчас, может позже") == ReplyCategory.NEGATIVE
+    assert classify_rule_based("Пока не готовы") == ReplyCategory.NEGATIVE
+    assert classify_rule_based("Пока рано об этом говорить") == ReplyCategory.NEGATIVE
