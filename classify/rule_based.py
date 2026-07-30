@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import re
+
 from db.models import ReplyCategory
+
+_STANDALONE_DA_RE = re.compile(r"(?<![а-яё])да(?![а-яё])")
 
 NEGATIVE_MARKERS = (
     "неактуальн",
@@ -67,7 +71,7 @@ def classify_rule_based(message_text: str) -> ReplyCategory:
     if any(marker in lowered for marker in QUESTION_MARKERS):
         return ReplyCategory.AMBIGUOUS
 
-    if any(marker in lowered for marker in POSITIVE_MARKERS):
+    if any(marker in lowered for marker in POSITIVE_MARKERS) or _STANDALONE_DA_RE.search(lowered):
         return ReplyCategory.POSITIVE
 
     return ReplyCategory.AMBIGUOUS

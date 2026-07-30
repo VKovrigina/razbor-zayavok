@@ -21,6 +21,15 @@ def test_unclear_reply_defaults_to_ambiguous():
     assert classify_rule_based("хм ладно посмотрим") == ReplyCategory.AMBIGUOUS
 
 
+def test_bare_da_is_positive():
+    """P-013: голое "Да" без запятой/точки/восклицания тоже должно матчиться как позитив, но
+    без ложных срабатываний на словах, содержащих "да" как часть слова."""
+    assert classify_rule_based("Да") == ReplyCategory.POSITIVE
+    assert classify_rule_based("да") == ReplyCategory.POSITIVE
+    assert classify_rule_based("Иногда бывает по-разному") == ReplyCategory.AMBIGUOUS
+    assert classify_rule_based("Куда там, не успеем") == ReplyCategory.AMBIGUOUS
+
+
 def test_soft_deferral_treated_as_negative():
     """Мягкие отказы без "неактуально" — клиент откладывает без объяснения причины, это
     считается отказом (negative), а не неоднозначным ответом."""
