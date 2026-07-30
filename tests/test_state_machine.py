@@ -91,6 +91,61 @@ def test_faq_cap_reached_forces_escalation(repo, monkeypatch):
     assert state_machine.templates.TASK_TEXT_FAQ_LIMIT_REACHED in task_texts
 
 
+def test_faq_cap_reached_does_not_unlock_before_escalation(repo, monkeypatch):
+    """P-039: на cap-й итерации лок не должен сниматься через resume_awaiting_reply ДО того, как
+    эскалация подтверждена — иначе конкурентный handle_incoming_reply мог бы стартовать
+    дублирующий цикл в этом окне."""
+    manager_tasks, sent_messages = _patch_common(monkeypatch)
+    _patch_faq_match(monkeypatch, "faq_price", "Точная цена после оценки.")
+    _make_deal_awaiting_reply(repo, 20)
+
+    resume_calls = []
+    original_resume = state_machine.repo.resume_awaiting_reply
+
+    def spy_resume(deal_id, next_action_at):
+        resume_calls.append(deal_id)
+        return original_resume(deal_id, next_action_at)
+
+    monkeypatch.setattr(state_machine.repo, "resume_awaiting_reply", spy_resume)
+
+    for _ in range(state_machine._FAQ_CYCLE_CAP - 1):
+        _handle(20, "сколько это стоит?")
+    assert len(resume_calls) == state_machine._FAQ_CYCLE_CAP - 1  # цикл продолжался — лок снят
+
+    # Cap-я итерация — цикл НЕ продолжается, resume_awaiting_reply не должен вызываться.
+    _handle(20, "сколько это стоит?")
+
+    assert len(resume_calls) == state_machine._FAQ_CYCLE_CAP - 1  # без изменений
+    deal = repo.get_deal(20)
+    assert deal.status == Status.ESCALATED_AMBIGUOUS
+    assert deal.in_progress is False  # снято через repo.escalate, не resume_awaiting_reply
+
+
+def test_faq_cap_reached_stays_locked_if_escalation_fails(repo, monkeypatch):
+    """P-039: если эскалация на cap-й итерации не проходит (после всех ретраев), сделка должна
+    явно разблокироваться через unlock, а не оставаться неопределённо разлоченной с середины
+    cap-проверки."""
+    manager_tasks, sent_messages = _patch_common(monkeypatch)
+    _patch_faq_match(monkeypatch, "faq_price", "Точная цена после оценки.")
+    _make_deal_awaiting_reply(repo, 21)
+
+    for _ in range(state_machine._FAQ_CYCLE_CAP - 1):
+        _handle(21, "сколько это стоит?")
+
+    def failing_escalate(deal_id, status):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(state_machine.repo, "escalate", failing_escalate)
+    monkeypatch.setattr(state_machine, "_DB_WRITE_RETRY_DELAY_SECONDS", 0)
+
+    _handle(21, "сколько это стоит?")
+
+    deal = repo.get_deal(21)
+    assert deal.status == Status.AWAITING_REPLY_1  # эскалация не прошла — статус не менялся
+    assert deal.in_progress is False  # но явно разблокирована для повторной попытки
+    assert deal.faq_cycle_count == state_machine._FAQ_CYCLE_CAP  # инкремент уже случился
+
+
 def test_faq_match_but_send_fails_falls_back_to_normal_escalation(repo, monkeypatch):
     """P-019: если отправить автоответ не удалось, restart_reminder_cycle не вызывается — сделка
     уходит в обычную эскалацию, а не остаётся молча ждать несуществующего ответа."""

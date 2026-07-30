@@ -96,6 +96,43 @@ def test_restart_reminder_cycle_increments_faq_cycle_count_and_returns_it(repo):
     assert repo.get_deal(42).faq_cycle_count == 3
 
 
+def test_increment_faq_cycle_count_has_no_side_effects_on_status_or_lock(repo):
+    """P-039: инкремент счётчика отдельно от снятия лока/сброса статуса — вызывающая сторона
+    (core/state_machine.py) должна успеть проверить cap ДО того, как сделка станет доступна
+    конкурентному handle_incoming_reply."""
+    from core import timeutils
+
+    repo.create_deal_new(49, 400, "Анна", "anna_test", None, "amoCRM", "Кейс 4")
+    repo.set_awaiting_first_sent(49, "telegram", 111, timeutils.to_iso(timeutils.utcnow()))
+    repo.try_lock(49)
+
+    assert repo.increment_faq_cycle_count(49) == 1
+    assert repo.increment_faq_cycle_count(49) == 2
+
+    deal = repo.get_deal(49)
+    assert deal.faq_cycle_count == 2
+    assert deal.in_progress is True  # лок не тронут
+    assert deal.status == Status.AWAITING_REPLY_1  # статус не тронут
+
+
+def test_resume_awaiting_reply_unlocks_without_touching_faq_cycle_count(repo):
+    from core import timeutils
+
+    repo.create_deal_new(50, 400, "Анна", "anna_test", None, "amoCRM", "Кейс 4")
+    repo.set_awaiting_first_sent(50, "telegram", 111, timeutils.to_iso(timeutils.utcnow()))
+    repo.try_lock(50)
+    repo.increment_faq_cycle_count(50)
+
+    next_action_at = timeutils.to_iso(timeutils.utcnow())
+    repo.resume_awaiting_reply(50, next_action_at)
+
+    deal = repo.get_deal(50)
+    assert deal.in_progress is False
+    assert deal.status == Status.AWAITING_REPLY_1
+    assert deal.next_action_at == next_action_at
+    assert deal.faq_cycle_count == 1  # не тронут повторно
+
+
 def test_stop_reminders_clears_next_action_at_without_changing_status(repo):
     from core import timeutils
 

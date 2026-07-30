@@ -355,6 +355,40 @@ def restart_reminder_cycle(deal_id: int, next_action_at: str) -> int:
         return row["faq_cycle_count"]
 
 
+def increment_faq_cycle_count(deal_id: int) -> int:
+    """Как и `restart_reminder_cycle`, но БЕЗ побочных эффектов на status/next_action_at/
+    in_progress — нужно узнать новое значение счётчика ДО решения, продолжать ли цикл
+    (`resume_awaiting_reply`, снимает лок) или сразу эскалировать, не отпуская лок раньше времени
+    (P-039 в BACKLOG.md: иначе конкурентный `handle_incoming_reply` может успеть `try_lock` и
+    запустить дублирующий цикл, пока эскалация ещё не подтверждена)."""
+    ts = now_iso()
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE deals SET faq_cycle_count = faq_cycle_count + 1, updated_at = ? WHERE deal_id = ?",
+            (ts, deal_id),
+        )
+        row = conn.execute(
+            "SELECT faq_cycle_count FROM deals WHERE deal_id = ?", (deal_id,)
+        ).fetchone()
+        return row["faq_cycle_count"]
+
+
+def resume_awaiting_reply(deal_id: int, next_action_at: str) -> None:
+    """Часть `restart_reminder_cycle` без инкремента `faq_cycle_count` (см.
+    `increment_faq_cycle_count`) — используется, когда счётчик уже увеличен отдельно и решение
+    "продолжаем цикл, не эскалируем" уже принято (P-039 в BACKLOG.md)."""
+    ts = now_iso()
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE deals
+            SET status = ?, next_action_at = ?, reminder_count = 0, in_progress = 0, updated_at = ?
+            WHERE deal_id = ?
+            """,
+            (Status.AWAITING_REPLY_1.value, next_action_at, ts, deal_id),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Telegram flood-wait cooldown
 # ---------------------------------------------------------------------------

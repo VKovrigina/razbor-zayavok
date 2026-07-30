@@ -268,6 +268,46 @@ async def _restart_reminder_cycle_with_retries(deal_id: int, next_action_at: str
     return None
 
 
+async def _increment_faq_cycle_count_with_retries(deal_id: int) -> int | None:
+    """Инкремент `faq_cycle_count` БЕЗ снятия лока (см. `repo.increment_faq_cycle_count`) —
+    нужно узнать новое значение ДО решения, продолжать ли цикл или эскалировать, не отпуская
+    лок раньше времени (P-039 в BACKLOG.md)."""
+    for attempt in range(1, _DB_WRITE_RETRY_ATTEMPTS + 1):
+        try:
+            return repo.increment_faq_cycle_count(deal_id)
+        except Exception:
+            logger.exception(
+                "Сделка %s: попытка %s/%s зафиксировать инкремент FAQ-цикла не удалась",
+                deal_id,
+                attempt,
+                _DB_WRITE_RETRY_ATTEMPTS,
+            )
+            if attempt < _DB_WRITE_RETRY_ATTEMPTS:
+                await asyncio.sleep(_DB_WRITE_RETRY_DELAY_SECONDS)
+    return None
+
+
+async def _resume_awaiting_reply_with_retries(deal_id: int, next_action_at: str) -> bool:
+    """Снимает лок и планирует следующее ожидание (см. `repo.resume_awaiting_reply`) — вызывать
+    ТОЛЬКО когда уже решено, что цикл продолжается (cap не достигнут), иначе лок снимается раньше
+    времени и конкурентный `handle_incoming_reply` может стартовать дублирующий цикл, пока
+    эскалация ещё не подтверждена (P-039 в BACKLOG.md)."""
+    for attempt in range(1, _DB_WRITE_RETRY_ATTEMPTS + 1):
+        try:
+            repo.resume_awaiting_reply(deal_id, next_action_at)
+            return True
+        except Exception:
+            logger.exception(
+                "Сделка %s: попытка %s/%s зафиксировать продолжение FAQ-цикла не удалась",
+                deal_id,
+                attempt,
+                _DB_WRITE_RETRY_ATTEMPTS,
+            )
+            if attempt < _DB_WRITE_RETRY_ATTEMPTS:
+                await asyncio.sleep(_DB_WRITE_RETRY_DELAY_SECONDS)
+    return False
+
+
 async def process_scheduler_tick() -> None:
     """Вызывается периодически: рассылает напоминание №1 / закрывающее сообщение тем, у кого
     подошло время, согласно `next_action_at`. Та же цепочка обслуживает и ожидание ответа на
@@ -380,13 +420,18 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
 
     Ambiguous С совпадением в базе знаний — бот отвечает сам (ответ + закрывающий вопрос про
     передачу кейса на оценку, `templates.faq_answer_with_followup`) и остаётся ждать реакции
-    клиента (`repo.restart_reminder_cycle`, та же цепочка напоминаний, что после первого
+    клиента (`repo.resume_awaiting_reply`, та же цепочка напоминаний, что после первого
     сообщения). На КАЖДЫЙ такой автоответ ставится задача Варваре (человек в курсе, что бот
     ответил сам) — но полной эскалации (перевод на 'Ручная проверка') пока нет: следующий ответ
     клиента снова проходит через эту функцию (содержательный ответ → positive/negative → обычная
     эскалация ниже; ещё один вопрос из базы знаний → снова эта ветка). После `_FAQ_CYCLE_CAP`
     подряд отвеченных вопросов по одной сделке — принудительная полная эскалация вместо
-    очередного автоответа (P-020 в BACKLOG.md). Если отправить автоответ не удалось — это
+    очередного автоответа (P-020 в BACKLOG.md). Счётчик (`repo.increment_faq_cycle_count`)
+    инкрементируется и проверяется на cap ДО снятия лока со сделки — лок снимается либо через
+    `resume_awaiting_reply` (цикл продолжается), либо через эскалацию ниже (cap достигнут); между
+    этими двумя решениями сделка остаётся залоченной, иначе конкурентный вызов этой функции по
+    той же сделке мог бы стартовать дублирующий цикл, пока эскалация ещё не подтверждена (P-039
+    в BACKLOG.md). Если отправить автоответ не удалось — это
     равносильно "ответа в базе нет": обычная эскалация БЕЗ ответа клиенту (`reply_text=None`),
     `restart_reminder_cycle` не вызывается (P-019 в BACKLOG.md).
 
@@ -554,21 +599,37 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
                     "Сделка %s: не удалось создать задачу Варваре по авто-ответу FAQ", deal_id
                 )
 
-            cycle_count = await _restart_reminder_cycle_with_retries(
-                deal_id, timeutils.next_reminder_at_iso()
-            )
+            # P-039 в BACKLOG.md: инкремент счётчика и снятие лока разделены — лок остаётся, пока
+            # не решено, продолжаем цикл или эскалируем. Раньше одна restart_reminder_cycle сразу
+            # снимала лок ДО проверки cap — окно между этим и последующей эскалацией позволяло
+            # конкурентному handle_incoming_reply стартовать дублирующий цикл на той же сделке.
+            cycle_count = await _increment_faq_cycle_count_with_retries(deal_id)
             if cycle_count is None:
                 logger.warning(
-                    "Сделка %s: не удалось зафиксировать restart_reminder_cycle — сделка "
+                    "Сделка %s: не удалось зафиксировать инкремент FAQ-цикла — сделка "
                     "разблокирована для повторной попытки",
                     deal_id,
                 )
                 repo.unlock(deal_id)
                 return
+
             if cycle_count < _FAQ_CYCLE_CAP:
+                # Цикл продолжается — только теперь снимаем лок и планируем ожидание.
+                if not await _resume_awaiting_reply_with_retries(
+                    deal_id, timeutils.next_reminder_at_iso()
+                ):
+                    logger.warning(
+                        "Сделка %s: не удалось зафиксировать продолжение FAQ-цикла — сделка "
+                        "разблокирована для повторной попытки",
+                        deal_id,
+                    )
+                    repo.unlock(deal_id)
                 return
+
             # Предел повторов исчерпан (P-020) — принудительно эскалируем. Клиенту уже отправлен
-            # ответ+закрывающий вопрос выше, повторно ничего не шлём (reply_text=None).
+            # ответ+закрывающий вопрос выше, повторно ничего не шлём (reply_text=None). Сделка
+            # остаётся залоченной вплоть до эскалации ниже (repo.escalate сам снимает лок при
+            # успехе, явный unlock — при провале, см. P-039 в BACKLOG.md).
             reply_text = None
             task_text = templates.TASK_TEXT_FAQ_LIMIT_REACHED
             new_status = Status.ESCALATED_AMBIGUOUS
