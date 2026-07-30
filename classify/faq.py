@@ -132,6 +132,12 @@ def _faq_catalog_text() -> str:
     return "\n".join(f"- {e['id']}: {e['examples']}" for e in _USABLE_ENTRIES)
 
 
+def _system_prompt_with_catalog() -> str:
+    # Каталог — в system, не в user-сообщении: он статичен между вызовами (в отличие от
+    # case_context/message_text), поэтому кэшируется вместе с промптом (cache_control ниже).
+    return f"{_SYSTEM_PROMPT}\n\nБаза знаний:\n{_faq_catalog_text()}"
+
+
 def match_faq_sync(message_text: str, case_context: str | None) -> str | None:
     """Возвращает id подходящего пункта базы знаний, либо None (FAQ выключен, нет совпадения,
     либо нет API-ключа)."""
@@ -143,14 +149,19 @@ def match_faq_sync(message_text: str, case_context: str | None) -> str | None:
     response = _client.messages.create(
         model=settings.anthropic_model,
         max_tokens=200,
-        system=_SYSTEM_PROMPT,
+        system=[
+            {
+                "type": "text",
+                "text": _system_prompt_with_catalog(),
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
         tools=[_TOOL],
         tool_choice={"type": "tool", "name": "match_faq"},
         messages=[
             {
                 "role": "user",
                 "content": (
-                    f"База знаний:\n{_faq_catalog_text()}\n\n"
                     f"Контекст задачи клиента: {case_context or '—'}\n\n"
                     f"Вопрос клиента:\n{message_text}"
                 ),

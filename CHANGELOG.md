@@ -5,6 +5,16 @@
 
 ## [Unreleased]
 
+### Changed
+- **Prompt caching для всех вызовов Claude (2026-07-30, P-057):** снижение расхода токенов без
+  изменения качества ответов — все 6 функций (`classify_sync`, `match_faq_sync`,
+  `checklist.assess/assess_topic/describes_addition_to_case/mentions_messaging_work`) используют
+  статичные system-промпты (не меняются от сделки к сделке); теперь помечены
+  `cache_control: {"type": "ephemeral"}`, при повторных вызовах в течение TTL кэша Anthropic
+  берёт ~10% обычной цены за эти input-токены. В `match_faq_sync` каталог FAQ перенесён из
+  user-сообщения в system — раньше был статичным по содержанию, но смешан с динамическим текстом
+  вопроса клиента и поэтому не кэшировался. Промпты и логика не менялись.
+
 ### Fixed
 - **IMAP/SMTP без таймаута могли застопорить общий пул потоков (2026-07-30, P-043):**
   `email_channel/sender.py` создавал `imaplib.IMAP4_SSL` (копия письма в "Отправленные") и

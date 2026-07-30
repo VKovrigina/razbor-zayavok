@@ -40,7 +40,9 @@ def classify_sync(message_text: str, case_context: str | None) -> ReplyCategory:
     response = _client.messages.create(
         model=settings.anthropic_model,
         max_tokens=200,
-        system=SYSTEM_PROMPT,
+        # cache_control: SYSTEM_PROMPT одинаков на каждый вызов — Anthropic кэширует этот
+        # префикс, повторные вызовы в течение TTL кэша платят ~10% цены за эти input-токены.
+        system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
         tools=[_TOOL],
         tool_choice={"type": "tool", "name": "classify_reply"},
         messages=[

@@ -65,7 +65,7 @@ def _case_describes_problem_or_data(case_text: str | None) -> bool:
     response = _client.messages.create(
         model=settings.anthropic_model,
         max_tokens=100,
-        system=_SYSTEM_PROMPT,
+        system=[{"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
         tools=[_TOOL],
         tool_choice={"type": "tool", "name": "assess_case"},
         messages=[{"role": "user", "content": f"Текст поля 'Задача':\n{case_text}"}],
@@ -231,7 +231,9 @@ def assess_topic(stack_text: str | None, case_text: str | None) -> list[str]:
         # после per_criterion_analysis) — KeyError на проде, сделка навсегда застревала в NEW
         # (см. BACKLOG.md, найдено 2026-07-27).
         max_tokens=1024,
-        system=_TOPIC_SYSTEM_PROMPT,
+        system=[
+            {"type": "text", "text": _TOPIC_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}
+        ],
         tools=[_TOPIC_TOOL],
         tool_choice={"type": "tool", "name": "assess_topic"},
         messages=[
@@ -304,7 +306,9 @@ def describes_addition_to_case(text: str | None) -> bool:
     response = _client.messages.create(
         model=settings.anthropic_model,
         max_tokens=100,
-        system=_ADDITION_SYSTEM_PROMPT,
+        system=[
+            {"type": "text", "text": _ADDITION_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}
+        ],
         tools=[_ADDITION_TOOL],
         tool_choice={"type": "tool", "name": "assess_addition"},
         messages=[{"role": "user", "content": f"Ответ клиента:\n{text}"}],
@@ -385,7 +389,9 @@ def mentions_messaging_work(case_text: str | None) -> bool:
     response = _client.messages.create(
         model=settings.anthropic_model,
         max_tokens=100,
-        system=_MESSAGING_SYSTEM_PROMPT,
+        system=[
+            {"type": "text", "text": _MESSAGING_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}
+        ],
         tools=[_MESSAGING_TOOL],
         tool_choice={"type": "tool", "name": "assess_messaging_work"},
         messages=[{"role": "user", "content": f"Задача клиента:\n{case_text}"}],
