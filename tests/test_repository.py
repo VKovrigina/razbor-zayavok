@@ -146,3 +146,44 @@ def test_set_messaging_tariff_flagged_updates_value(repo):
     repo.set_messaging_tariff_flagged(44, True)
 
     assert repo.get_deal(44).messaging_tariff_flagged is True
+
+
+def test_list_recent_activity_returns_latest_event_per_deal(repo):
+    from core import timeutils
+
+    repo.create_deal_new(45, 400, "Анна", "anna_test", None, "amoCRM", "Кейс 4")
+    since = timeutils.to_iso(timeutils.utcnow())
+    repo.log_event(45, "out", "telegram", "Первое сообщение")
+    repo.log_event(45, "in", "telegram", "Ответ клиента")
+
+    rows = repo.list_recent_activity(since)
+
+    assert len(rows) == 1
+    assert rows[0]["deal_id"] == 45
+    assert rows[0]["direction"] == "in"
+    assert rows[0]["text"] == "Ответ клиента"
+    assert rows[0]["channel"] == "telegram"
+
+
+def test_list_recent_activity_ignores_events_before_window(repo):
+    from core import timeutils
+
+    repo.create_deal_new(46, 400, "Анна", "anna_test", None, "amoCRM", "Кейс 4")
+    repo.log_event(46, "out", "telegram", "Старое сообщение")
+    since = timeutils.to_iso(timeutils.utcnow())
+
+    assert repo.list_recent_activity(since) == []
+
+
+def test_list_recent_activity_covers_multiple_deals(repo):
+    from core import timeutils
+
+    repo.create_deal_new(47, 400, "Анна", "anna_test", None, "amoCRM", "Кейс 4")
+    repo.create_deal_new(48, 400, "Борис", "boris_test", None, "amoCRM", "Кейс 5")
+    since = timeutils.to_iso(timeutils.utcnow())
+    repo.log_event(47, "out", "telegram", "Сообщение 1")
+    repo.log_event(48, "out", "email", "Сообщение 2")
+
+    rows = repo.list_recent_activity(since)
+
+    assert {r["deal_id"] for r in rows} == {47, 48}

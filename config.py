@@ -68,6 +68,11 @@ class Settings:
     email_imap_user: str = os.environ.get("EMAIL_IMAP_USER", "")
     email_imap_password: str = os.environ.get("EMAIL_IMAP_PASSWORD", "")
 
+    # Отчётность в вебхук (Albato) — P-014 в BACKLOG.md: видимость работы бота и уведомление о
+    # краше, сам механизм реконнекта Telethon (main.py:44) не чинит.
+    report_webhook_url: str = os.environ.get("REPORT_WEBHOOK_URL", "")
+    report_interval_seconds: int = _int("REPORT_INTERVAL_SECONDS", 7200)
+
     # Общие
     timezone: str = os.environ.get("TIMEZONE", "Europe/Moscow")
     db_path: str = os.environ.get("DB_PATH", "data/app.db")

@@ -418,3 +418,34 @@ def log_event(deal_id: int, direction: str, channel: str | None, text: str) -> N
             "INSERT INTO events_log (deal_id, ts, direction, channel, text) VALUES (?, ?, ?, ?, ?)",
             (deal_id, now_iso(), direction, channel, text),
         )
+
+
+def list_recent_activity(since_iso: str) -> list[dict]:
+    """Сделки, по которым было хоть одно событие начиная с `since_iso` — по каждой сделке только
+    САМОЕ ПОЗДНЕЕ событие в окне. Используется периодическим отчётом в вебхук (см.
+    reporting/reporter.py, P-014 в BACKLOG.md)."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT e.deal_id, e.ts, e.direction, e.text, d.channel, d.status
+            FROM events_log e
+            JOIN deals d ON d.deal_id = e.deal_id
+            WHERE e.ts >= ?
+            ORDER BY e.deal_id, e.ts
+            """,
+            (since_iso,),
+        ).fetchall()
+    latest: dict[int, sqlite3.Row] = {}
+    for row in rows:
+        latest[row["deal_id"]] = row  # ORDER BY ts ASC — последняя запись на deal_id и есть новейшая
+    return [
+        {
+            "deal_id": row["deal_id"],
+            "channel": row["channel"] or "",
+            "status": row["status"],
+            "direction": row["direction"],
+            "text": row["text"] or "",
+            "date": row["ts"],
+        }
+        for row in latest.values()
+    ]
