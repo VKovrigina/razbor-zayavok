@@ -14,6 +14,12 @@ logger = logging.getLogger(__name__)
 # IMAP-имя папки "Отправленные" в этом почтовом ящике (Яндекс Почта).
 _SENT_FOLDER = "Sent"
 
+# Без явного timeout imaplib/smtplib используют socket.getdefaulttimeout() (по умолчанию None —
+# блокировка навсегда). Зависший TCP-коннект к почтовому серверу мог бы повесить поток в общем
+# ThreadPoolExecutor (используется ВСЕМИ asyncio.to_thread-вызовами приложения) бесконечно,
+# останавливая не только email (P-043 в BACKLOG.md). Значение — как в amo/client.py/amo/auth.py.
+_MAIL_TIMEOUT_SECONDS = 30
+
 
 def send_email_sync(to_address: str, subject: str, body: str) -> None:
     msg = MIMEText(body, "plain", "utf-8")
@@ -22,7 +28,9 @@ def send_email_sync(to_address: str, subject: str, body: str) -> None:
     msg["To"] = to_address
     msg["Date"] = formatdate(localtime=True)
 
-    with smtplib.SMTP_SSL(settings.email_smtp_host, settings.email_smtp_port) as smtp:
+    with smtplib.SMTP_SSL(
+        settings.email_smtp_host, settings.email_smtp_port, timeout=_MAIL_TIMEOUT_SECONDS
+    ) as smtp:
         smtp.login(settings.email_smtp_user, settings.email_smtp_password)
         smtp.send_message(msg)
 
@@ -36,7 +44,9 @@ def _save_to_sent(msg: MIMEText) -> None:
     здесь не должен считаться неудачей отправки — письмо уже реально доставлено через SMTP выше,
     поэтому только логируем и не бросаем исключение."""
     try:
-        with imaplib.IMAP4_SSL(settings.email_imap_host, settings.email_imap_port) as imap:
+        with imaplib.IMAP4_SSL(
+            settings.email_imap_host, settings.email_imap_port, timeout=_MAIL_TIMEOUT_SECONDS
+        ) as imap:
             imap.login(settings.email_imap_user, settings.email_imap_password)
             imap.append(
                 _SENT_FOLDER,
