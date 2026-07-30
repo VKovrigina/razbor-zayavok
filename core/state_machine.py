@@ -199,6 +199,14 @@ def _deal_in_reminder_eligible_stage(deal_id: int) -> bool:
     return status_id in _REMINDER_ELIGIBLE_STAGE_IDS
 
 
+def _deal_taken_by_partner(deal_id: int) -> bool:
+    """Партнёр уже забрал сделку в работу (этап 'взят партнёром', см. проект "Выдача кейсов к
+    группу") — дальше клиента ведёт партнёр в отдельном чате, бот полностью замолкает даже для
+    вопросов, на которые знает ответ (P-056 в BACKLOG.md)."""
+    status_id = amo_actions.get_lead_status_id(deal_id)
+    return status_id == settings.amocrm_stage_taken_by_partner_id
+
+
 async def _escalate_with_retries(deal_id: int, new_status: Status) -> bool:
     """`repo.escalate` — единственный шаг классификации ответа, который обязан зафиксироваться
     (см. P-008 в BACKLOG.md): вызывается ДО побочных эффектов (примечание/ответ клиенту/смена
@@ -355,7 +363,10 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
 
     Positive/negative, а также ambiguous без совпадения в базе знаний — сразу переводятся на этап
     'Ручная проверка' и на Варвару ставится задача (после этого бот больше не реагирует на
-    сообщения по этой сделке, см. INACTIVE_STATUSES). Если ответ positive — перед переводом в
+    сообщения по этой сделке, см. INACTIVE_STATUSES). Ambiguous без совпадения в базе — бот
+    клиенту НЕ отвечает вовсе (реагирует только на вопросы, которые реально знает через FAQ,
+    P-055 в BACKLOG.md); эскалация и задача Варваре при этом происходят как обычно. Если ответ
+    positive — перед переводом в
     сделку добавляется примечание с собранным ТЗ И записывается то же самое в custom-поле
     «Полное ТЗ» (см. `core/templates.py: spec_note`, `amo_actions.set_full_spec_field`) — поле
     читает соседний проект "Выдача кейсов к группу" при публикации кейса партнёрам. Ответ клиента
@@ -376,8 +387,8 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
     эскалация ниже; ещё один вопрос из базы знаний → снова эта ветка). После `_FAQ_CYCLE_CAP`
     подряд отвеченных вопросов по одной сделке — принудительная полная эскалация вместо
     очередного автоответа (P-020 в BACKLOG.md). Если отправить автоответ не удалось — это
-    равносильно "ответа в базе нет": обычная эскалация с `REPLY_AMBIGUOUS`, `restart_reminder_cycle`
-    не вызывается (P-019 в BACKLOG.md).
+    равносильно "ответа в базе нет": обычная эскалация БЕЗ ответа клиенту (`reply_text=None`),
+    `restart_reminder_cycle` не вызывается (P-019 в BACKLOG.md).
 
     Если сделка занята (напр. шедулер шлёт напоминание) — не бросаем сообщение сразу, а пробуем
     получить блокировку ещё `_LOCK_RETRY_ATTEMPTS` раз с паузой `_LOCK_RETRY_INTERVAL_SECONDS`
@@ -387,7 +398,11 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
     `ESCALATED_POSITIVE` — исключение среди `INACTIVE_STATUSES`: клиент уже согласился, ТЗ собрано
     и передано, но он может продолжать задавать вопросы. Такие сообщения не доходят до классификации
     и полного цикла выше — см. `_answer_faq_after_positive` (без закрывающего вопроса про оценку
-    кейса — он уже передан, и без новой задачи Варваре — человек уже в курсе).
+    кейса — он уже передан, и без новой задачи Варваре — человек уже в курсе). Исключение из
+    исключения (добавлено 2026-07-29, P-056): если сделка уже на этапе 'взят партнёром'
+    (`_deal_taken_by_partner`, реальный статус в amoCRM, не локальный) — партнёр уже ведёт клиента
+    сам, и бот полностью замолкает — ни автоответа по базе знаний, ни задачи, вообще никакой
+    реакции на входящее сообщение.
 
     Если сделка ещё НЕ помечена флагом `messaging_tariff_flagged` (см. `process_new_deal`), а
     текущее входящее сообщение упоминает работу с сообщениями (`checklist.mentions_messaging_work`)
@@ -409,7 +424,9 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
         return
     if deal.status in INACTIVE_STATUSES:
         if deal.status == Status.ESCALATED_POSITIVE:
-            await _answer_faq_after_positive(deal_id, deal, text)
+            taken_by_partner = await asyncio.to_thread(_deal_taken_by_partner, deal_id)
+            if not taken_by_partner:
+                await _answer_faq_after_positive(deal_id, deal, text)
         return  # уже эскалировано/заблокировано/провалено — полный цикл бота дальше не идёт
 
     if not repo.try_lock(deal_id):
@@ -551,14 +568,16 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
             if cycle_count < _FAQ_CYCLE_CAP:
                 return
             # Предел повторов исчерпан (P-020) — принудительно эскалируем. Клиенту уже отправлен
-            # ответ+закрывающий вопрос выше, повторно REPLY_AMBIGUOUS не шлём (reply_text=None).
+            # ответ+закрывающий вопрос выше, повторно ничего не шлём (reply_text=None).
             reply_text = None
             task_text = templates.TASK_TEXT_FAQ_LIMIT_REACHED
             new_status = Status.ESCALATED_AMBIGUOUS
         else:
             # Ответа в базе знаний нет, либо отправка не удалась (P-019: в обоих случаях клиент
-            # ничего содержательного не получил — restart_reminder_cycle не вызываем).
-            reply_text = templates.REPLY_AMBIGUOUS
+            # ничего содержательного не получил — restart_reminder_cycle не вызываем). Бот молчит
+            # клиенту (reply_text=None) — отвечает только на вопросы, которые реально знает;
+            # эскалация и задача Варваре при этом всё равно происходят (P-055 в BACKLOG.md).
+            reply_text = None
             task_text = templates.TASK_TEXT_CLARIFICATION
             new_status = Status.ESCALATED_AMBIGUOUS
 
@@ -589,8 +608,10 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
             logger.exception("Сделка %s: не удалось записать текст ТЗ в поле 'Полное ТЗ'", deal_id)
 
     if reply_text is not None:
-        # None — только когда предел повторов FAQ-цикла исчерпан: клиенту уже отправлен ответ+
-        # закрывающий вопрос выше, повторно слать нечего.
+        # None в двух случаях: (1) предел повторов FAQ-цикла исчерпан — клиенту уже отправлен
+        # ответ+закрывающий вопрос выше, повторно слать нечего; (2) вопрос неопределённый и без
+        # совпадения в базе знаний — бот молчит клиенту, эскалация и задача Варваре уходят как
+        # обычно (P-055 в BACKLOG.md).
         try:
             await _send_via_channel(deal, reply_text)
             repo.log_event(deal_id, "out", deal.channel.value, reply_text)

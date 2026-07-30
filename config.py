@@ -32,6 +32,10 @@ class Settings:
     amocrm_stage_silence_id: int | None = _int("AMOCRM_STAGE_SILENCE_ID")
     amocrm_stage_manual_review_id: int | None = _int("AMOCRM_STAGE_MANUAL_REVIEW_ID")
     amocrm_stage_blocked_id: int | None = _int("AMOCRM_STAGE_BLOCKED_ID")
+    # "взят партнёром" — общий этап с проектом "Выдача кейсов к группу" (его AGENTS.md,
+    # AMOCRM_STAGE_TAKEN_BY_PARTNER_ID). Не переводим сюда сами — только читаем, чтобы понять,
+    # что партнёр уже забрал сделку в работу (см. core/state_machine.py: handle_incoming_reply).
+    amocrm_stage_taken_by_partner_id: int | None = _int("AMOCRM_STAGE_TAKEN_BY_PARTNER_ID")
 
     amocrm_field_id_telegram: int | None = _int("AMOCRM_FIELD_ID_TELEGRAM")
     amocrm_field_id_stack: int | None = _int("AMOCRM_FIELD_ID_STACK")

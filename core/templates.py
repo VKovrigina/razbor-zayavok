@@ -146,8 +146,6 @@ REPLY_NEGATIVE = (
 # REPLY_NEGATIVE: это не общий отказ от заявки, а конкретно от условий тарифа на сообщения.
 REPLY_MESSAGING_NEGATIVE = "Поняла вас, спасибо за ответ. Будем рады помочь вам в решении других задач"
 
-REPLY_AMBIGUOUS = "Ваш вопрос я зафиксировала, в ближайшее время с вами свяжется менеджер."
-
 # Клиент уже согласился (сделка ESCALATED_POSITIVE), задал вопрос, которого нет в базе знаний —
 # см. core/state_machine.py: _answer_faq_after_positive. Без задачи Варваре — кейс уже передан.
 REPLY_NO_FAQ_MATCH_AFTER_POSITIVE = (

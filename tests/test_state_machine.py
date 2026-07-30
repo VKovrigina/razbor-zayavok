@@ -36,6 +36,7 @@ def _patch_common(monkeypatch):
         state_machine.classify_client, "classify_sync", lambda text, case: ReplyCategory.AMBIGUOUS
     )
     monkeypatch.setattr(state_machine.checklist, "mentions_messaging_work", lambda text: False)
+    monkeypatch.setattr(state_machine.amo_actions, "get_lead_status_id", lambda deal_id: None)
 
     sent_messages = []
 
@@ -111,7 +112,10 @@ def test_faq_match_but_send_fails_falls_back_to_normal_escalation(repo, monkeypa
     assert manager_tasks == [(3, state_machine.templates.TASK_TEXT_CLARIFICATION)]
 
 
-def test_faq_no_match_behaves_as_before(repo, monkeypatch):
+def test_faq_no_match_escalates_silently_without_replying_to_client(repo, monkeypatch):
+    """P-055: неопределённый вопрос без совпадения в базе знаний — бот клиенту не отвечает
+    вовсе (реагирует только на вопросы, которые реально знает), но эскалация и задача Варваре
+    происходят как обычно."""
     manager_tasks, sent_messages = _patch_common(monkeypatch)
     _patch_faq_match(monkeypatch, None)
     _make_deal_awaiting_reply(repo, 4)
@@ -121,7 +125,7 @@ def test_faq_no_match_behaves_as_before(repo, monkeypatch):
     deal = repo.get_deal(4)
     assert deal.status == Status.ESCALATED_AMBIGUOUS
     assert deal.faq_cycle_count == 0
-    assert sent_messages == [state_machine.templates.REPLY_AMBIGUOUS]
+    assert sent_messages == []
     assert manager_tasks[-1][1] == state_machine.templates.TASK_TEXT_CLARIFICATION
 
 
@@ -392,6 +396,33 @@ def test_post_positive_escalation_no_match_sends_fixed_reply_without_task(repo, 
     assert deal.status == Status.ESCALATED_POSITIVE
     assert sent_messages == [state_machine.templates.REPLY_NO_FAQ_MATCH_AFTER_POSITIVE]
     assert manager_tasks == []
+
+
+def test_deal_taken_by_partner_stays_fully_silent(repo, monkeypatch):
+    """P-056: как только партнёр забрал сделку (реальный этап amoCRM 'взят партнёром'), бот
+    больше не отвечает даже на вопросы, которые знает через FAQ — партнёр ведёт клиента сам."""
+    manager_tasks, sent_messages = _patch_common(monkeypatch)
+    partner_stage_id = state_machine.settings.amocrm_stage_taken_by_partner_id
+    monkeypatch.setattr(
+        state_machine.amo_actions, "get_lead_status_id", lambda deal_id: partner_stage_id
+    )
+    faq_called = False
+
+    def should_not_be_called(text, case):
+        nonlocal faq_called
+        faq_called = True
+        return "faq_price"
+
+    monkeypatch.setattr(state_machine.faq_client, "match_faq_sync", should_not_be_called)
+    _make_deal_escalated(repo, 33, Status.ESCALATED_POSITIVE)
+
+    _handle(33, "а сколько всё-таки стоит?")
+
+    deal = repo.get_deal(33)
+    assert deal.status == Status.ESCALATED_POSITIVE
+    assert sent_messages == []
+    assert manager_tasks == []
+    assert faq_called is False
 
 
 def test_other_escalated_statuses_remain_fully_silent(repo, monkeypatch):
