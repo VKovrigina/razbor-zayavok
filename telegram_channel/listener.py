@@ -16,7 +16,9 @@ _pending: dict[int, list[str]] = {}
 
 
 def register_handlers() -> None:
-    get_client().add_event_handler(_on_new_message, events.NewMessage(incoming=True))
+    get_client().add_event_handler(
+        _on_new_message, events.NewMessage(incoming=True, func=lambda e: e.is_private)
+    )
 
 
 async def _on_new_message(event) -> None:
