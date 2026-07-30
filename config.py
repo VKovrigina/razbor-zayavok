@@ -78,7 +78,7 @@ class Settings:
     db_path: str = os.environ.get("DB_PATH", "data/app.db")
     amocrm_poll_interval_seconds: int = _int("AMOCRM_POLL_INTERVAL_SECONDS", 90)
     scheduler_tick_seconds: int = _int("SCHEDULER_TICK_SECONDS", 60)
-    daily_telegram_send_cap: int = _int("DAILY_TELEGRAM_SEND_CAP", 40)
+    daily_telegram_send_cap: int = _int("DAILY_TELEGRAM_SEND_CAP", 500)
     reminder_hour_local: int = _int("REMINDER_HOUR_LOCAL", 14)
 
     # Обязательные для старта поля (без них сервис не может выполнять свою основную функцию)

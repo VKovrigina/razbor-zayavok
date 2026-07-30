@@ -175,6 +175,13 @@ def test_list_recent_activity_ignores_events_before_window(repo):
     assert repo.list_recent_activity(since) == []
 
 
+def test_get_daily_send_count_does_not_increment(repo):
+    assert repo.get_daily_send_count() == 0
+    repo.increment_and_check_daily_cap(10)
+    assert repo.get_daily_send_count() == 1
+    assert repo.get_daily_send_count() == 1  # повторный вызов peek — не меняет счётчик
+
+
 def test_list_recent_activity_covers_multiple_deals(repo):
     from core import timeutils
 

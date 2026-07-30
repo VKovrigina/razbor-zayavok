@@ -28,25 +28,34 @@ async def _jitter(low: float, high: float) -> None:
 
 
 async def _send(target, text: str) -> int:
-    if not ratelimit.allow_send():
+    if not ratelimit.is_send_allowed():
         raise TelegramSendError("Достигнут дневной лимит отправок или активен cooldown")
+
+    client = get_client()
     try:
-        client = get_client()
         entity = await client.get_entity(target)
+    except (UsernameNotOccupiedError, UsernameInvalidError, ValueError) as e:
+        # До реальной попытки отправки не дошло — не тратим дневной лимит (P-017 в BACKLOG.md).
+        raise TelegramSendError(f"Некорректный или несуществующий username: {e}") from e
+
+    try:
         await client.send_message(entity, text)
-        return entity.id
     except FloodWaitError as e:
+        ratelimit.record_send_attempt()
         ratelimit.set_cooldown(e.seconds)
         logger.warning("FloodWaitError: cooldown на %s сек", e.seconds)
         raise TelegramSendError(f"FloodWait {e.seconds}s") from e
     except PeerFloodError as e:
+        ratelimit.record_send_attempt()
         ratelimit.set_cooldown(24 * 3600)
         logger.error("PeerFloodError — ставим все first-contact отправки на паузу на 24ч")
         raise TelegramSendError("PeerFlood") from e
     except UserPrivacyRestrictedError as e:
+        # Реальной доставки не было — не тратим дневной лимит (P-017 в BACKLOG.md).
         raise TelegramSendError("UserPrivacyRestricted") from e
-    except (UsernameNotOccupiedError, UsernameInvalidError, ValueError) as e:
-        raise TelegramSendError(f"Некорректный или несуществующий username: {e}") from e
+    else:
+        ratelimit.record_send_attempt()
+        return entity.id
 
 
 async def send_first_contact(username: str, text: str) -> int:

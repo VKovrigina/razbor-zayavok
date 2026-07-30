@@ -5,6 +5,18 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Дневной лимит Telegram-отправок тратился на неудачные попытки (2026-07-30, P-017):**
+  `telegram_channel/ratelimit.py: allow_send()` инкрементировал счётчик ДО реальной попытки
+  отправки — невалидный/несуществующий username (`UsernameNotOccupiedError`/`UsernameInvalidError`)
+  и приватность получателя (`UserPrivacyRestrictedError`) жгли дневной лимит без единой
+  доставки, хотя это анти-бан предохранитель для личного Telegram-аккаунта. Разделено на
+  `is_send_allowed()` (проверка без инкремента) и `record_send_attempt()` (инкремент только по
+  факту реальной попытки: успех, `FloodWaitError`, `PeerFloodError` — это реальные сигналы от
+  Telegram, ради которых лимит и существует). `db/repository.py: get_daily_send_count()` — новый
+  peek без побочного эффекта. Заодно `DAILY_TELEGRAM_SEND_CAP` увеличен с 40 до 500 (решение
+  пользователя, риск-аппетит аккаунта).
+
 ### Added
 - **Алерт при истёкшем/отозванном amoCRM-токене (2026-07-30, P-015):** `amo/poller.py: poll_loop`
   раньше ловил любую ошибку одним общим `except Exception` — 401 от amoCRM API (истёкший/

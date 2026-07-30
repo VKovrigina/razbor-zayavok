@@ -408,6 +408,16 @@ def increment_and_check_daily_cap(cap: int) -> bool:
         return row["count"] <= cap
 
 
+def get_daily_send_count() -> int:
+    """Текущее значение счётчика за сегодня БЕЗ инкремента — используется для проверки лимита
+    ДО попытки отправки (см. telegram_channel/ratelimit.py: is_send_allowed, P-017 в
+    BACKLOG.md), сам инкремент — отдельно, только по факту реальной попытки."""
+    day = datetime.now(timezone.utc).date().isoformat()
+    with _connect() as conn:
+        row = conn.execute("SELECT count FROM send_counters WHERE day = ?", (day,)).fetchone()
+        return row["count"] if row else 0
+
+
 # ---------------------------------------------------------------------------
 # Журнал сообщений
 # ---------------------------------------------------------------------------
