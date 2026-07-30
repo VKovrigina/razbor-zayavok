@@ -24,6 +24,27 @@ def send_report(rows: list[dict]) -> None:
     _post({"type": "report", "sent_at": repo.now_iso(), "rows": rows})
 
 
+def send_error_notification(marker: str, message: str) -> None:
+    """Общий канал для явных сбоев вне обычного крашо-детекта (например, P-015 — истёкший/
+    отозванный amoCRM-токен) — та же структура, что и send_crash_notification, с произвольным
+    маркером в колонке deal_id и текстом ошибки."""
+    _post(
+        {
+            "type": "error",
+            "sent_at": repo.now_iso(),
+            "rows": [
+                {
+                    "deal_id": marker,
+                    "channel": "",
+                    "status": "",
+                    "last_action": message,
+                    "date": repo.now_iso(),
+                }
+            ],
+        }
+    )
+
+
 def send_crash_notification(last_seen_at: str | None) -> None:
     """Бот обнаружил при старте, что предыдущий запуск не завершился штатно (см.
     reporting/crash.py) — единственный явный сигнал о падении, P-014 в BACKLOG.md

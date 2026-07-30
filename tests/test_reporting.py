@@ -44,6 +44,16 @@ def test_send_report_posts_type_report_with_rows(captured_posts):
     assert payload["rows"] == rows
 
 
+def test_send_error_notification_posts_type_error_with_marker(captured_posts):
+    webhook.send_error_notification("AMOCRM ТОКЕН ИСТЁК", "amoCRM API вернул 401")
+
+    assert len(captured_posts) == 1
+    payload = captured_posts[0]["json"]
+    assert payload["type"] == "error"
+    assert payload["rows"][0]["deal_id"] == "AMOCRM ТОКЕН ИСТЁК"
+    assert payload["rows"][0]["last_action"] == "amoCRM API вернул 401"
+
+
 def test_send_crash_notification_posts_marker_row(captured_posts):
     webhook.send_crash_notification("2026-07-30T10:00:00+00:00")
 
