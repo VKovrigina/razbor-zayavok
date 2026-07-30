@@ -54,8 +54,10 @@ async def poll_once() -> None:
                 deal_id,
                 conflict.deal_id,
             )
+            move_ok = False
             try:
                 await asyncio.to_thread(move_to_blocked, conflict.deal_id)
+                move_ok = True
             except Exception:
                 logger.exception(
                     "Сделка %s: не удалось перевести на этап 'Блок' (замена сделкой %s)",
@@ -63,16 +65,36 @@ async def poll_once() -> None:
                     deal_id,
                 )
             repo.block_superseded(conflict.deal_id, deal_id)
+            task_ok = False
             try:
                 await asyncio.to_thread(
                     create_manager_task, conflict.deal_id, templates.task_text_superseded(deal_id)
                 )
+                task_ok = True
             except Exception:
                 logger.exception(
                     "Сделка %s: не удалось создать задачу на Варвару (замена сделкой %s)",
                     conflict.deal_id,
                     deal_id,
                 )
+
+            if not move_ok and not task_ok:
+                # Ни смены этапа, ни задачи — в CRM не осталось вообще никакого следа, что
+                # заявка потерялась (P-041 в BACKLOG.md). Единственный оставшийся способ узнать
+                # об этом — вебхук.
+                try:
+                    report_webhook.send_error_notification(
+                        str(conflict.deal_id),
+                        f"Сделка заменена новой ({deal_id}), но не удалось ни перевести на этап "
+                        "'Блок', ни поставить задачу Варваре — в amoCRM нет никакого следа",
+                    )
+                except Exception:
+                    logger.exception(
+                        "Сделка %s: не удалось отправить алерт о полном сбое блокировки "
+                        "(замена %s)",
+                        conflict.deal_id,
+                        deal_id,
+                    )
 
         await state_machine.process_new_deal(deal_id)
 
