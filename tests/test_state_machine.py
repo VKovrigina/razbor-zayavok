@@ -70,6 +70,36 @@ def test_faq_match_answers_and_waits_without_escalating(repo, monkeypatch):
     assert len(manager_tasks) == 1  # задача Варваре на каждый автоответ
 
 
+def test_faq_answer_delivered_but_log_event_fails_still_counts_as_answered(repo, monkeypatch):
+    """P-040: если сообщение реально доставлено, а repo.log_event упал — это НЕ должно
+    считаться "ответа не было" (неверный текст задачи Варваре, инкремент не произошедший,
+    хотя ответ реально ушёл клиенту)."""
+    manager_tasks, sent_messages = _patch_common(monkeypatch)
+    faq_answer = "Точная цена после оценки."
+    _patch_faq_match(monkeypatch, "faq_price", faq_answer)
+    _make_deal_awaiting_reply(repo, 19)
+
+    real_log_event = state_machine.repo.log_event
+
+    def flaky_log_event(deal_id, direction, channel, text):
+        if direction == "out":
+            raise RuntimeError("log_event boom")
+        return real_log_event(deal_id, direction, channel, text)
+
+    monkeypatch.setattr(state_machine.repo, "log_event", flaky_log_event)
+
+    question = "сколько это стоит?"
+    _handle(19, question)
+
+    deal = repo.get_deal(19)
+    assert deal.status == Status.AWAITING_REPLY_1  # НЕ эскалировано — ответ реально доставлен
+    assert deal.faq_cycle_count == 1  # инкремент произошёл, как при обычном успешном ответе
+    assert len(sent_messages) == 1  # клиенту ушёл именно FAQ-ответ, ничего повторно/взамен
+    task_texts = [t for _, t in manager_tasks]
+    assert state_machine.templates.task_text_faq_answered(question, faq_answer) in task_texts
+    assert state_machine.templates.TASK_TEXT_CLARIFICATION not in task_texts
+
+
 def test_faq_cap_reached_forces_escalation(repo, monkeypatch):
     manager_tasks, sent_messages = _patch_common(monkeypatch)
     _patch_faq_match(monkeypatch, "faq_price", "Точная цена после оценки.")

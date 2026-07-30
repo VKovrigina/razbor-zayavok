@@ -581,10 +581,20 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
             combined_text = templates.faq_answer_with_followup(faq_answer)
             try:
                 await _send_via_channel(deal, combined_text)
-                repo.log_event(deal_id, "out", deal.channel.value, combined_text)
                 faq_answer_sent = True
             except Exception:
                 logger.exception("Сделка %s: не удалось отправить ответ из базы знаний", deal_id)
+
+            if faq_answer_sent:
+                # Запись в лог — отдельно от факта доставки (P-040 в BACKLOG.md): сообщение уже
+                # реально ушло клиенту, сбой log_event не должен превращать это в "ответа не было"
+                # (неверный текст задачи Варваре, повторная попытка ответить тем же вопросом).
+                try:
+                    repo.log_event(deal_id, "out", deal.channel.value, combined_text)
+                except Exception:
+                    logger.exception(
+                        "Сделка %s: ответ из базы знаний отправлен, но не залогирован", deal_id
+                    )
 
         if faq_answer_sent:
             # Задача Варваре на КАЖДЫЙ автоответ — человек в курсе, что бот ответил сам (продуктовое
