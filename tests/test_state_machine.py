@@ -215,9 +215,10 @@ def test_faq_no_match_escalates_silently_without_replying_to_client(repo, monkey
 
 
 def test_positive_reply_with_addition_includes_it_in_note_and_field(repo, monkeypatch):
-    """Полное ТЗ пишется дважды (примечание для Варвары + custom-поле для "Выдача кейсов к
-    группу") одним и тем же текстом; содержательный ответ клиента добавляется строкой
-    "Дополнение: ..."."""
+    """Полное ТЗ пишется дважды (примечание для Варвары + custom-поле для "Выдача кейсов
+    партнёрам") одним и тем же содержанием — но поле без эмодзи (партнёры видят его дословно),
+    примечание с эмодзи (только Варвара внутри CRM). Содержательный ответ клиента добавляется
+    строкой "Дополнение: ..." в обоих местах."""
     _patch_common(monkeypatch)
     monkeypatch.setattr(
         state_machine.classify_client, "classify_sync", lambda text, case: ReplyCategory.POSITIVE
@@ -243,7 +244,7 @@ def test_positive_reply_with_addition_includes_it_in_note_and_field(repo, monkey
     assert deal.status == Status.ESCALATED_POSITIVE
     assert len(note_calls) == 1
     assert "Дополнение: Да, ещё нужно передавать статусы заказов" in note_calls[0][1]
-    assert field_calls == note_calls  # тот же текст уходит в оба места
+    assert field_calls[0][1] == note_calls[0][1].replace("🔸", "")  # то же содержание, без эмодзи
 
 
 def test_positive_reply_bare_agreement_excludes_addition_line(repo, monkeypatch):
@@ -269,7 +270,7 @@ def test_positive_reply_bare_agreement_excludes_addition_line(repo, monkeypatch)
     _handle(41, "да, жду")
 
     assert "Дополнение" not in note_calls[0][1]
-    assert field_calls == note_calls
+    assert field_calls[0][1] == note_calls[0][1].replace("🔸", "")  # то же содержание, без эмодзи
 
 
 def test_positive_reply_full_spec_field_failure_does_not_block_escalation(repo, monkeypatch):

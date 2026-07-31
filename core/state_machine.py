@@ -674,7 +674,8 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
         except Exception:
             logger.exception("Сделка %s: не удалось добавить примечание с ТЗ", deal_id)
         try:
-            await asyncio.to_thread(amo_actions.set_full_spec_field, deal_id, note_text)
+            field_text = templates.full_spec_field_text(deal.stack_text, case_with_addition)
+            await asyncio.to_thread(amo_actions.set_full_spec_field, deal_id, field_text)
         except Exception:
             logger.exception("Сделка %s: не удалось записать текст ТЗ в поле 'Полное ТЗ'", deal_id)
 

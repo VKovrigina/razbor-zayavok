@@ -66,8 +66,9 @@ class AmoClient:
     def get_contact(self, contact_id: int) -> dict:
         return self.get(f"/api/v4/contacts/{contact_id}")
 
-    def get_lead(self, lead_id: int) -> dict:
-        return self.get(f"/api/v4/leads/{lead_id}")
+    def get_lead(self, lead_id: int, with_contacts: bool = False) -> dict:
+        params = {"with": "contacts"} if with_contacts else None
+        return self.get(f"/api/v4/leads/{lead_id}", params=params)
 
     def update_lead_status(self, lead_id: int, status_id: int) -> None:
         self.patch(f"/api/v4/leads/{lead_id}", {"status_id": status_id})
@@ -115,6 +116,48 @@ class AmoClient:
         self.patch(
             f"/api/v4/leads/{lead_id}",
             {"custom_fields_values": [{"field_id": field_id, "values": [{"value": value}]}]},
+        )
+
+    def list_open_tasks(self, responsible_user_id: int) -> list[dict]:
+        """Все незавершённые задачи на исполнителя, постранично (тот же паттерн, что
+        get_leads_in_stage). AmoCRM API v4 не фильтрует задачи по тексту — точное сравнение текста
+        триггера (сценарий "Выдача кейсов партнёрам", P-062) делает вызывающий код, не этот метод."""
+        limit = 250
+        max_pages = 40
+        tasks: list[dict] = []
+        page = 1
+        while page <= max_pages:
+            params = {
+                "filter[responsible_user_id]": responsible_user_id,
+                "filter[is_completed]": 0,
+                "limit": limit,
+                "page": page,
+            }
+            data = self.get("/api/v4/tasks", params=params)
+            batch = data.get("_embedded", {}).get("tasks", [])
+            if not batch:
+                break
+            tasks.extend(batch)
+            if len(batch) < limit:
+                break
+            page += 1
+        return tasks
+
+    def complete_task(self, task_id: int) -> None:
+        self.patch(f"/api/v4/tasks/{task_id}", {"is_completed": True})
+
+    def update_lead_status_and_field(
+        self, lead_id: int, status_id: int, field_id: int, value: str
+    ) -> None:
+        """Один PATCH: status_id + custom_fields_values вместе (сценарий "Выдача кейсов
+        партнёрам", Логика ИИ агента.md разд. 3.А) — устраняет риск частичного применения при
+        падении между двумя раздельными вызовами (`update_lead_status`/`set_lead_custom_field`)."""
+        self.patch(
+            f"/api/v4/leads/{lead_id}",
+            {
+                "status_id": status_id,
+                "custom_fields_values": [{"field_id": field_id, "values": [{"value": value}]}],
+            },
         )
 
 

@@ -5,6 +5,7 @@ from core.templates import (
     TASK_TEXT_FAQ_LIMIT_REACHED,
     faq_answer_with_followup,
     first_message,
+    full_spec_field_text,
     spec_note,
     task_text_faq_answered,
 )
@@ -89,6 +90,19 @@ def test_spec_note_formats_stack_and_case():
 def test_spec_note_uses_dash_fallback_for_missing_fields():
     note = spec_note(None, None)
     assert note == "🔸Сервисы: —\n🔸Задача: —"
+
+
+def test_full_spec_field_text_has_no_emoji():
+    """Поле «Полное ТЗ» партнёры видят дословно при публикации кейса — без эмодзи, в отличие
+    от примечания (spec_note)."""
+    text = full_spec_field_text("amoCRM + Sheets", "Синхронизировать лиды")
+    assert text == "Сервисы: amoCRM + Sheets\nЗадача: Синхронизировать лиды"
+    assert "🔸" not in text
+
+
+def test_full_spec_field_text_uses_dash_fallback_for_missing_fields():
+    text = full_spec_field_text(None, None)
+    assert text == "Сервисы: —\nЗадача: —"
 
 
 def test_faq_answer_with_followup_appends_one_of_known_questions():
