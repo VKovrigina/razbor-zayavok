@@ -361,9 +361,9 @@ async def _answer_faq_after_positive(deal_id: int, deal: Deal, text: str) -> Non
     """Клиент уже согласился (сделка в `ESCALATED_POSITIVE`, ТЗ собрано и передано), но продолжает
     писать вопросы. Бот по-прежнему может ответить по базе знаний — но БЕЗ закрывающего вопроса
     про передачу кейса на оценку (кейс уже передан) и БЕЗ новой задачи Варваре (человек уже в
-    курсе, задача `TASK_TEXT_FINALIZE_SPEC` уже стоит). Если вопрос не нашёлся в базе — фиксированный
-    ответ, что тема будет закрыта вместе с результатом оценки (тоже без задачи). Продуктовое
-    решение, см. Логика ИИ агента.md.
+    курсе, задача `TASK_TEXT_FINALIZE_SPEC` уже стоит). Если вопрос не нашёлся в базе — бот молчит
+    (та же логика, что для ambiguous без совпадения в `handle_incoming_reply`, P-055) — отвечает
+    только на вопросы, которые реально знает через FAQ. Продуктовое решение, см. Логика ИИ агента.md.
 
     Лок берётся однократно, без ретраев (в отличие от основного пути) — это необязательная
     любезность поверх уже завершённого сценария, не стоит того, чтобы держать клиента в очереди
@@ -383,16 +383,15 @@ async def _answer_faq_after_positive(deal_id: int, deal: Deal, text: str) -> Non
                 deal_id,
             )
 
-        reply_text = (
-            faq_client.get_answer(faq_id) if faq_id else templates.REPLY_NO_FAQ_MATCH_AFTER_POSITIVE
-        )
-        try:
-            await _send_via_channel(deal, reply_text)
-            repo.log_event(deal_id, "out", deal.channel.value, reply_text)
-        except Exception:
-            logger.exception(
-                "Сделка %s: не удалось отправить ответ клиенту после согласия", deal_id
-            )
+        if faq_id:
+            reply_text = faq_client.get_answer(faq_id)
+            try:
+                await _send_via_channel(deal, reply_text)
+                repo.log_event(deal_id, "out", deal.channel.value, reply_text)
+            except Exception:
+                logger.exception(
+                    "Сделка %s: не удалось отправить ответ клиенту после согласия", deal_id
+                )
     finally:
         repo.unlock(deal_id)
 

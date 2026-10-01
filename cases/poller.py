@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from amo.actions import _get_field_value
+from amo.actions import get_field_value
 from amo.client import amo_client
 from cases import repository as repo
 from cases import templates
@@ -29,7 +29,7 @@ def list_trigger_tasks() -> list[dict]:
 
 
 def extract_full_spec(lead: dict) -> str | None:
-    return _get_field_value(lead, field_id=settings.amocrm_field_id_full_spec)
+    return get_field_value(lead, field_id=settings.amocrm_field_id_full_spec)
 
 
 def _alert_once(kv_prefix: str, task_id: int, deal_id: int, message: str) -> None:

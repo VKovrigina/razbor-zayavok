@@ -471,7 +471,7 @@ def test_post_positive_escalation_faq_match_answers_without_followup_or_task(rep
     assert manager_tasks == []  # БЕЗ новой задачи
 
 
-def test_post_positive_escalation_no_match_sends_fixed_reply_without_task(repo, monkeypatch):
+def test_post_positive_escalation_no_match_stays_silent(repo, monkeypatch):
     manager_tasks, sent_messages = _patch_common(monkeypatch)
     _patch_faq_match(monkeypatch, None)
     _make_deal_escalated(repo, 31, Status.ESCALATED_POSITIVE)
@@ -480,7 +480,7 @@ def test_post_positive_escalation_no_match_sends_fixed_reply_without_task(repo, 
 
     deal = repo.get_deal(31)
     assert deal.status == Status.ESCALATED_POSITIVE
-    assert sent_messages == [state_machine.templates.REPLY_NO_FAQ_MATCH_AFTER_POSITIVE]
+    assert sent_messages == []  # бот молчит — как и для ambiguous без совпадения (P-055)
     assert manager_tasks == []
 
 

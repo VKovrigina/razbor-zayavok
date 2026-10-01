@@ -14,7 +14,7 @@ from config import settings
 _USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
 
 
-def _get_field_value(entity: dict, field_id: int | None = None, field_code: str | None = None) -> str | None:
+def get_field_value(entity: dict, field_id: int | None = None, field_code: str | None = None) -> str | None:
     for field in entity.get("custom_fields_values") or []:
         if field_id is not None and field.get("field_id") == field_id:
             values = field.get("values") or []
@@ -25,7 +25,7 @@ def _get_field_value(entity: dict, field_id: int | None = None, field_code: str 
     return None
 
 
-def _clean_username(value: str | None) -> str | None:
+def clean_username(value: str | None) -> str | None:
     if not value:
         return None
     value = value.strip()
@@ -39,9 +39,9 @@ def _clean_username(value: str | None) -> str | None:
 
 def extract_lead_data(lead: dict) -> dict:
     """Достаёт из сделки и привязанного контакта все поля, нужные для первого сообщения."""
-    telegram_username = _get_field_value(lead, field_id=settings.amocrm_field_id_telegram)
-    stack_text = _get_field_value(lead, field_id=settings.amocrm_field_id_stack)
-    case_text = _get_field_value(lead, field_id=settings.amocrm_field_id_case)
+    telegram_username = get_field_value(lead, field_id=settings.amocrm_field_id_telegram)
+    stack_text = get_field_value(lead, field_id=settings.amocrm_field_id_stack)
+    case_text = get_field_value(lead, field_id=settings.amocrm_field_id_case)
 
     contacts = (lead.get("_embedded") or {}).get("contacts") or []
     contact_id = contacts[0]["id"] if contacts else None
@@ -51,12 +51,12 @@ def extract_lead_data(lead: dict) -> dict:
     if contact_id:
         contact = amo_client.get_contact(contact_id)
         contact_name = contact.get("name")
-        email_address = _get_field_value(contact, field_code="EMAIL")
+        email_address = get_field_value(contact, field_code="EMAIL")
 
     return {
         "contact_id": contact_id,
         "contact_name": contact_name,
-        "telegram_username": _clean_username(telegram_username),
+        "telegram_username": clean_username(telegram_username),
         "email_address": email_address,
         "stack_text": stack_text,
         "case_text": case_text,

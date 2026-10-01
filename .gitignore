@@ -9,3 +9,4 @@ __pycache__/
 graphify-out/
 data/.telegram_login_state.json
 data/*.log
+.DS_Store

@@ -68,6 +68,31 @@ class Settings:
     # не в General.
     telegram_cases_topic_id: int | None = _int("TELEGRAM_CASES_TOPIC_ID")
 
+    # Звонки — воронка «Партнеры - интеграторы» (main_calls.py), третий независимый процесс
+    # по образцу main_cases.py: своя БД, своя telethon-сессия (то же TELEGRAM_API_ID/API_HASH/
+    # PHONE выше), свой дневной антиспам-счётчик (не общий с main.py/main_cases.py).
+    amocrm_calls_pipeline_id: int | None = _int("AMOCRM_CALLS_PIPELINE_ID")
+    amocrm_calls_stage_primary_contact_id: int | None = _int("AMOCRM_CALLS_STAGE_PRIMARY_CONTACT_ID")
+    amocrm_calls_stage_written_in_tg_id: int | None = _int("AMOCRM_CALLS_STAGE_WRITTEN_IN_TG_ID")
+    amocrm_calls_stage_meeting_id: int | None = _int("AMOCRM_CALLS_STAGE_MEETING_ID")
+    # Поле КОНТАКТА (не сделки, в отличие от amocrm_field_id_telegram выше) — "Telegram"
+    amocrm_calls_contact_field_id_telegram: int | None = _int("AMOCRM_CALLS_CONTACT_FIELD_ID_TELEGRAM")
+
+    telegram_calls_session_path: str = os.environ.get(
+        "TELEGRAM_CALLS_SESSION_PATH", "data/telegram_calls.session"
+    )
+    daily_telegram_calls_send_cap: int = _int("DAILY_TELEGRAM_CALLS_SEND_CAP", 500)
+
+    # Яндекс CalDAV — пароль приложения с доступом "Календарь" (НЕ email_smtp_password выше,
+    # у Яндекса пароли приложений разделены по доступу — см. ~/Work/yandex-calendar)
+    calendar_caldav_login: str = os.environ.get("CALENDAR_CALDAV_LOGIN", "")
+    calendar_caldav_password: str = os.environ.get("CALENDAR_CALDAV_PASSWORD", "")
+    # Пусто = первый календарь в списке (см. calls/calendar_client.py)
+    calendar_name: str = os.environ.get("CALENDAR_NAME", "")
+    calendar_telemost_link: str = os.environ.get("CALENDAR_TELEMOST_LINK", "")
+
+    db_calls_path: str = os.environ.get("DB_CALLS_PATH", "data/app_calls.db")
+
     # Anthropic
     anthropic_api_key: str = os.environ.get("ANTHROPIC_API_KEY", "")
     anthropic_model: str = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
@@ -146,6 +171,28 @@ class Settings:
         compare=False,
     )
 
+    # Обязательные для старта main_calls.py — отдельный набор, НЕ добавляется в _required выше
+    _required_calls: tuple = field(
+        default=(
+            "amocrm_base_url",
+            "amocrm_varvara_user_id",
+            "amocrm_calls_pipeline_id",
+            "amocrm_calls_stage_primary_contact_id",
+            "amocrm_calls_stage_written_in_tg_id",
+            "amocrm_calls_stage_meeting_id",
+            "amocrm_calls_contact_field_id_telegram",
+            "telegram_api_id",
+            "telegram_api_hash",
+            "telegram_phone",
+            "telegram_calls_session_path",
+            "calendar_caldav_login",
+            "calendar_caldav_password",
+            "calendar_telemost_link",
+        ),
+        repr=False,
+        compare=False,
+    )
+
     def validate(self) -> None:
         # ANTHROPIC_API_KEY намеренно не в _required: без него classify.client переключается
         # на классификацию по правилам (classify/rule_based.py) — грубее, но работоспособно.
@@ -163,6 +210,16 @@ class Settings:
         if missing:
             raise RuntimeError(
                 "Не заполнены обязательные переменные окружения для main_cases.py: "
+                + ", ".join(m.upper() for m in missing)
+                + ". Смотрите .env.example."
+            )
+
+    def validate_calls(self) -> None:
+        """Отдельная валидация для main_calls.py — не влияет и не вызывается из validate()."""
+        missing = [name for name in self._required_calls if not getattr(self, name)]
+        if missing:
+            raise RuntimeError(
+                "Не заполнены обязательные переменные окружения для main_calls.py: "
                 + ", ".join(m.upper() for m in missing)
                 + ". Смотрите .env.example."
             )

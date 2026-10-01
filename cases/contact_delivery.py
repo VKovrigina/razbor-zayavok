@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from amo.actions import _get_field_value, extract_lead_data
+from amo.actions import extract_lead_data, get_field_value
 from amo.client import amo_client
 from cases import group_creator
 from cases import repository as repo
@@ -58,7 +58,7 @@ async def _alert(deal_id: int, message: str) -> None:
 async def _deliver_via_telegram(task_id: int, deal_id: int, lead: dict, partner_tg_user_id: int) -> None:
     try:
         data = await asyncio.to_thread(extract_lead_data, lead)
-        case_text = _get_field_value(lead, field_id=settings.amocrm_field_id_full_spec)
+        case_text = get_field_value(lead, field_id=settings.amocrm_field_id_full_spec)
         client_nick = f"@{data['telegram_username']}" if data["telegram_username"] else "Клиент"
         title = templates.group_title(client_nick)
         link = await group_creator.create_group_with_invite(partner_tg_user_id, title)
