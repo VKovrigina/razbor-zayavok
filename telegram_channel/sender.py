@@ -17,6 +17,14 @@ from telegram_channel.client import get_client
 
 logger = logging.getLogger(__name__)
 
+# Без таймаута telethon-вызов может зависнуть навсегда, если соединение "зомби" (выглядит
+# подключённым после сетевого сбоя/авто-реконнекта, но не отвечает на новые запросы) — это вешало
+# весь main.py (asyncio.to_thread не спасает: зависает сам await внутри client.get_entity/
+# send_message), требуя ручного kill+restart процесса (найдено на реальном проде 2026-09-09,
+# трижды за один день). TimeoutError -> TelegramSendError даёт тот же email-фолбэк, что и остальные
+# ошибки Telegram, вместо бесконечного зависания.
+_TELETHON_CALL_TIMEOUT_SECONDS = 30
+
 
 class TelegramSendError(Exception):
     """Отправка через Telegram невозможна (приватность/несуществующий username/флуд/лимит) —
@@ -33,13 +41,29 @@ async def _send(target, text: str) -> int:
 
     client = get_client()
     try:
-        entity = await client.get_entity(target)
+        entity = await asyncio.wait_for(
+            client.get_entity(target), timeout=_TELETHON_CALL_TIMEOUT_SECONDS
+        )
     except (UsernameNotOccupiedError, UsernameInvalidError, ValueError) as e:
         # До реальной попытки отправки не дошло — не тратим дневной лимит (P-017 в BACKLOG.md).
         raise TelegramSendError(f"Некорректный или несуществующий username: {e}") from e
+    except asyncio.TimeoutError as e:
+        raise TelegramSendError(
+            f"get_entity завис дольше {_TELETHON_CALL_TIMEOUT_SECONDS}s — соединение, похоже, "
+            "в нерабочем состоянии"
+        ) from e
 
     try:
-        await client.send_message(entity, text)
+        await asyncio.wait_for(
+            client.send_message(entity, text), timeout=_TELETHON_CALL_TIMEOUT_SECONDS
+        )
+    except asyncio.TimeoutError as e:
+        # Неизвестно, ушло ли сообщение реально (ответ не дождались) — не тратим дневной лимит,
+        # тот же принцип, что для UsernameNotOccupied/PrivacyRestricted выше.
+        raise TelegramSendError(
+            f"send_message завис дольше {_TELETHON_CALL_TIMEOUT_SECONDS}s — соединение, похоже, "
+            "в нерабочем состоянии"
+        ) from e
     except FloodWaitError as e:
         ratelimit.record_send_attempt()
         ratelimit.set_cooldown(e.seconds)

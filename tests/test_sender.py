@@ -17,17 +17,29 @@ class _FakeEntity:
 
 
 class _FakeClient:
-    def __init__(self, get_entity_error=None, send_message_error=None):
+    def __init__(
+        self,
+        get_entity_error=None,
+        send_message_error=None,
+        get_entity_hangs=False,
+        send_message_hangs=False,
+    ):
         self.get_entity_error = get_entity_error
         self.send_message_error = send_message_error
+        self.get_entity_hangs = get_entity_hangs
+        self.send_message_hangs = send_message_hangs
         self.sent = []
 
     async def get_entity(self, target):
+        if self.get_entity_hangs:
+            await asyncio.sleep(3600)  # имитирует "зомби"-соединение, которое никогда не отвечает
         if self.get_entity_error:
             raise self.get_entity_error
         return _FakeEntity()
 
     async def send_message(self, entity, text):
+        if self.send_message_hangs:
+            await asyncio.sleep(3600)
         if self.send_message_error:
             raise self.send_message_error
         self.sent.append((entity, text))
@@ -102,3 +114,25 @@ def test_send_blocked_by_daily_cap_before_any_attempt(monkeypatch, recorded):
 
     assert recorded == []
     assert client.sent == []
+
+
+def test_send_raises_on_get_entity_hang_instead_of_blocking_forever(monkeypatch, recorded):
+    monkeypatch.setattr(sender, "_TELETHON_CALL_TIMEOUT_SECONDS", 0.05)
+    client = _FakeClient(get_entity_hangs=True)
+    monkeypatch.setattr(sender, "get_client", lambda: client)
+
+    with pytest.raises(TelegramSendError):
+        asyncio.run(_send("target", "text"))
+
+    assert recorded == []
+
+
+def test_send_raises_on_send_message_hang_instead_of_blocking_forever(monkeypatch, recorded):
+    monkeypatch.setattr(sender, "_TELETHON_CALL_TIMEOUT_SECONDS", 0.05)
+    client = _FakeClient(send_message_hangs=True)
+    monkeypatch.setattr(sender, "get_client", lambda: client)
+
+    with pytest.raises(TelegramSendError):
+        asyncio.run(_send("target", "text"))
+
+    assert recorded == []

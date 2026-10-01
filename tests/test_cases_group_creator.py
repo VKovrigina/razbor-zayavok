@@ -1,4 +1,8 @@
+from __future__ import annotations
+
 import asyncio
+
+import pytest
 
 from cases import group_creator
 
@@ -27,24 +31,35 @@ class FakeInvite:
 
 
 class FakeClient:
-    def __init__(self):
+    def __init__(self, hangs: set[str] | None = None):
         self.calls = []
+        self.hangs = hangs or set()
 
     async def get_participants(self, group_id):
+        if "get_participants" in self.hangs:
+            await asyncio.sleep(3600)
         self.calls.append(("get_participants", group_id))
 
     async def get_input_entity(self, user_id):
+        if "get_input_entity" in self.hangs:
+            await asyncio.sleep(3600)
         self.calls.append(("get_input_entity", user_id))
         return f"entity:{user_id}"
 
     async def get_entity(self, target):
+        if "get_entity" in self.hangs:
+            await asyncio.sleep(3600)
         self.calls.append(("get_entity", target))
         return f"entity:{target}"
 
     async def send_message(self, entity, text):
+        if "send_message" in self.hangs:
+            await asyncio.sleep(3600)
         self.calls.append(("send_message", entity, text))
 
     async def __call__(self, request):
+        if "request" in self.hangs:
+            await asyncio.sleep(3600)
         self.calls.append(("request", request))
         if request.__class__.__name__ == "CreateChatRequest":
             return FakeCreateChatResult(chat_id=42)
@@ -112,3 +127,39 @@ def test_send_dm_calls_client_send_message(monkeypatch):
 
     assert ("get_entity", "client_username") in fake.calls
     assert ("send_message", "entity:client_username", "текст сообщения") in fake.calls
+
+
+def test_create_group_with_invite_raises_on_get_participants_hang(monkeypatch):
+    monkeypatch.setattr(group_creator, "_TELETHON_CALL_TIMEOUT_SECONDS", 0.05)
+    fake = FakeClient(hangs={"get_participants"})
+    monkeypatch.setattr(group_creator, "get_client", lambda: fake)
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(group_creator.create_group_with_invite(555, "Тест & Альбато"))
+
+
+def test_create_group_with_invite_raises_on_create_chat_request_hang(monkeypatch):
+    monkeypatch.setattr(group_creator, "_TELETHON_CALL_TIMEOUT_SECONDS", 0.05)
+    fake = FakeClient(hangs={"request"})
+    monkeypatch.setattr(group_creator, "get_client", lambda: fake)
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(group_creator.create_group_with_invite(555, "Тест & Альбато"))
+
+
+def test_send_dm_raises_on_get_entity_hang(monkeypatch):
+    monkeypatch.setattr(group_creator, "_TELETHON_CALL_TIMEOUT_SECONDS", 0.05)
+    fake = FakeClient(hangs={"get_entity"})
+    monkeypatch.setattr(group_creator, "get_client", lambda: fake)
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(group_creator.send_dm("client_username", "текст сообщения"))
+
+
+def test_send_dm_raises_on_send_message_hang(monkeypatch):
+    monkeypatch.setattr(group_creator, "_TELETHON_CALL_TIMEOUT_SECONDS", 0.05)
+    fake = FakeClient(hangs={"send_message"})
+    monkeypatch.setattr(group_creator, "get_client", lambda: fake)
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(group_creator.send_dm("client_username", "текст сообщения"))

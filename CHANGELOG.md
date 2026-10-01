@@ -5,6 +5,23 @@
 
 ## [Unreleased]
 
+### Fixed
+- **`main.py`/`main_cases.py` зависали навсегда при "зомби"-telethon-соединении (2026-09-11/15,
+  P-068):** после сетевого сбоя telethon-соединение иногда оставалось выглядящим подключённым, но
+  не отвечало на новые запросы. В `main.py`: `telegram_channel/sender.py: _send`
+  (`client.get_entity`/`client.send_message`) зависал без таймаута и без единой строки в логе,
+  останавливая `amo_poll_loop` (обрабатывает сделки последовательно) навсегда — новые заявки
+  переставали подхватываться. Найдено на проде 2026-09-09 трижды за один день (сделки 40013935,
+  40015107). Тот же баг — в `main_cases.py`: `cases/group_creator.py` (`get_participants`,
+  `get_input_entity`, `CreateChatRequest`, `ExportChatInviteRequest`, `get_entity`,
+  `send_message`) уже вызывал реальные `FAILED_GROUP_CREATION`/`FAILED_CONTACT_SEND` ранее в этой
+  же сессии. Все вызовы в обоих файлах обёрнуты в `asyncio.wait_for(timeout=30)`:
+  `telegram_channel/sender.py` конвертирует таймаут в уже существующий `TelegramSendError`
+  (email-фолбэк в `core/state_machine.py: _send_first_contact`); `cases/group_creator.py`
+  пробрасывает `asyncio.TimeoutError` как есть — вызывающий код (`cases/contact_delivery.py`) уже
+  перехватывает любой `Exception` в `FAILED_*` + алерт. `tests/test_sender.py` (2 новых теста) и
+  `tests/test_cases_group_creator.py` (4 новых теста) — весь набор (312) зелёный.
+
 ### Changed
 - **`spec_note` (текст поля «Полное ТЗ») — без эмодзи (2026-07-31):** `core/templates.py:
   spec_note` теперь возвращает `"Сервисы: ...\nЗадача: ..."` без `🔸` (решение пользователя —
