@@ -3,6 +3,7 @@ from core.templates import (
     FAQ_FOLLOWUP_QUESTIONS,
     FIRST_MESSAGE_VARIANTS,
     TASK_TEXT_FAQ_LIMIT_REACHED,
+    clarify_missing_data_question,
     faq_answer_with_followup,
     first_message,
     full_spec_field_text,
@@ -65,6 +66,18 @@ def test_warning_inserted_before_payment_consent_paragraph():
 
 def test_warning_mentions_only_missing_field():
     text = first_message("Иван", "amoCRM", "Синхронизировать лиды из форм сайта в CRM", ["stack"])
+    assert "минимум два сервиса" in text
+    assert "ни данные, которые нужно обработать" not in text
+
+
+def test_clarify_missing_data_question_mentions_reasons():
+    text = clarify_missing_data_question(["stack", "case"])
+    assert "минимум два сервиса" in text
+    assert "ни данные, которые нужно обработать" in text
+
+
+def test_clarify_missing_data_question_mentions_only_missing_field():
+    text = clarify_missing_data_question(["stack"])
     assert "минимум два сервиса" in text
     assert "ни данные, которые нужно обработать" not in text
 

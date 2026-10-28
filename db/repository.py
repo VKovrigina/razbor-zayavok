@@ -33,6 +33,7 @@ def init_db() -> None:
         conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
         _migrate_add_faq_cycle_count(conn)
         _migrate_add_messaging_tariff_flag(conn)
+        _migrate_add_clarification_asked(conn)
 
 
 def _migrate_add_faq_cycle_count(conn: sqlite3.Connection) -> None:
@@ -52,6 +53,14 @@ def _migrate_add_messaging_tariff_flag(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE deals ADD COLUMN messaging_tariff_flagged INTEGER NOT NULL DEFAULT 0"
         )
+
+
+def _migrate_add_clarification_asked(conn: sqlite3.Connection) -> None:
+    """Как и `_migrate_add_faq_cycle_count` — на боевой БД, созданной до появления этой колонки,
+    её не будет без явного ALTER TABLE."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(deals)")}
+    if "clarification_asked" not in columns:
+        conn.execute("ALTER TABLE deals ADD COLUMN clarification_asked INTEGER NOT NULL DEFAULT 0")
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +251,17 @@ def set_messaging_tariff_flagged(deal_id: int, value: bool) -> None:
     with _connect() as conn:
         conn.execute(
             "UPDATE deals SET messaging_tariff_flagged = ?, updated_at = ? WHERE deal_id = ?",
+            (int(value), now_iso(), deal_id),
+        )
+
+
+def set_clarification_asked(deal_id: int, value: bool) -> None:
+    """Помечает, что бот уже один раз переспрашивал недостающие детали задачи при позитивном
+    ответе клиента — см. core/state_machine.py: handle_incoming_reply. Не более одного раза за
+    сделку, чтобы не зациклиться, если клиент так и не добавит деталей."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE deals SET clarification_asked = ?, updated_at = ? WHERE deal_id = ?",
             (int(value), now_iso(), deal_id),
         )
 

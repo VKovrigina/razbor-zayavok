@@ -125,6 +125,15 @@ def _data_warning(missing_fields: list[str]) -> str:
     return f"⚠️ Для точной оценки пока не хватает данных: {reasons}. Пожалуйста, дополните описание задачи."
 
 
+def clarify_missing_data_question(missing_fields: list[str]) -> str:
+    """Клиент согласился передать задачу на оценку, но в ней не хватает тех же данных, что
+    проверяет `_data_warning` в первом сообщении (core/checklist.py: assess). Спрашиваем один раз
+    перед эскалацией — см. core/state_machine.py: handle_incoming_reply,
+    deal.clarification_asked."""
+    reasons = "; ".join(_DATA_WARNING_REASONS[f] for f in missing_fields)
+    return f"Чтобы партнёр мог точно оценить задачу, уточните, пожалуйста: {reasons}."
+
+
 REMINDER_1 = "Здравствуйте, ваша заявка актуальна?"
 
 CLOSING_NO_REPLY = """Добрый день!

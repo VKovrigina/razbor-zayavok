@@ -60,6 +60,7 @@ class Deal:
     reminder_count: int
     faq_cycle_count: int
     messaging_tariff_flagged: bool
+    clarification_asked: bool
     next_action_at: str | None
     in_progress: bool
     telegram_send_cooldown_until: str | None
@@ -82,6 +83,7 @@ class Deal:
             reminder_count=row["reminder_count"],
             faq_cycle_count=row["faq_cycle_count"],
             messaging_tariff_flagged=bool(row["messaging_tariff_flagged"]),
+            clarification_asked=bool(row["clarification_asked"]),
             next_action_at=row["next_action_at"],
             in_progress=bool(row["in_progress"]),
             telegram_send_cooldown_until=row["telegram_send_cooldown_until"],

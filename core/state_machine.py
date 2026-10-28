@@ -412,6 +412,14 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
     добавляется строкой "Дополнение: ..." только если `checklist.describes_addition_to_case`
     решит, что это содержательное уточнение, а не голое согласие ("да"/"жду"/"хорошо").
 
+    Перед эскалацией positive-ответа ТЗ (стек + текст задачи, с учётом возможного "Дополнение: ...")
+    повторно проверяется тем же `checklist.assess`, что и в первом сообщении (core/templates.py:
+    first_message). Если пробелы остались и бот ещё ни разу не переспрашивал по этой сделке
+    (`deal.clarification_asked`) — вместо эскалации клиенту уходит уточняющий вопрос
+    (`templates.clarify_missing_data_question`), сделка возвращается в ожидание ответа (без
+    эскалации, без задачи Варваре). Не более одного раза за сделку — если клиент снова ответит
+    "да" без деталей, кейс эскалируется и публикуется как есть, чтобы не зависнуть навсегда.
+
     `repo.escalate` (см. `_escalate_with_retries`) вызывается ДО этих побочных эффектов, не после
     — если зафиксировать эскалацию так и не удастся, ничего из побочных эффектов ещё не произошло,
     и сделку можно безопасно разблокировать без риска дублей при следующей попытке (P-008 в
@@ -555,6 +563,43 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
         category = ReplyCategory.AMBIGUOUS
 
     if category == ReplyCategory.POSITIVE:
+        if checklist.describes_addition_to_case(text):
+            case_with_addition = f"{deal.case_text or ''}\n\nДополнение: {text}".strip()
+        else:
+            case_with_addition = deal.case_text or ""
+
+        missing = checklist.assess(deal.stack_text, case_with_addition)
+        if missing and not deal.clarification_asked:
+            # Клиент согласился, но ТЗ всё ещё неполное (тот же checklist, что в первом
+            # сообщении) — переспрашиваем один раз перед передачей партнёрам, вместо немедленной
+            # эскалации с дырами в задаче. Не более одного раза за сделку (clarification_asked),
+            # чтобы не зациклиться, если клиент так и не даст деталей — тогда эскалируем как есть.
+            try:
+                repo.set_clarification_asked(deal_id, True)
+            except Exception:
+                logger.exception(
+                    "Сделка %s: не удалось сохранить флаг запроса уточнения", deal_id
+                )
+            question_text = templates.clarify_missing_data_question(missing)
+            try:
+                await _send_via_channel(deal, question_text)
+                repo.log_event(deal_id, "out", deal.channel.value, question_text)
+            except Exception:
+                logger.exception(
+                    "Сделка %s: не удалось отправить уточняющий вопрос по недостающим данным",
+                    deal_id,
+                )
+            if not await _resume_awaiting_reply_with_retries(
+                deal_id, timeutils.next_reminder_at_iso()
+            ):
+                logger.warning(
+                    "Сделка %s: не удалось зафиксировать продолжение ожидания после запроса "
+                    "уточнения — сделка разблокирована для повторной попытки",
+                    deal_id,
+                )
+                repo.unlock(deal_id)
+            return
+
         reply_text = templates.REPLY_POSITIVE
         task_text = templates.TASK_TEXT_FINALIZE_SPEC
         new_status = Status.ESCALATED_POSITIVE
@@ -663,10 +708,6 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
         return
 
     if category == ReplyCategory.POSITIVE:
-        if checklist.describes_addition_to_case(text):
-            case_with_addition = f"{deal.case_text or ''}\n\nДополнение: {text}".strip()
-        else:
-            case_with_addition = deal.case_text or ""
         note_text = templates.spec_note(deal.stack_text, case_with_addition)
         try:
             await asyncio.to_thread(amo_actions.add_note, deal_id, note_text)

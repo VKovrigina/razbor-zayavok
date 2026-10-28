@@ -185,6 +185,19 @@ def test_set_messaging_tariff_flagged_updates_value(repo):
     assert repo.get_deal(44).messaging_tariff_flagged is True
 
 
+def test_create_deal_new_initializes_clarification_asked_to_false(repo):
+    repo.create_deal_new(45, 400, "Анна", "anna_test", None, "amoCRM", "Кейс 4")
+    assert repo.get_deal(45).clarification_asked is False
+
+
+def test_set_clarification_asked_updates_value(repo):
+    repo.create_deal_new(46, 400, "Анна", "anna_test", None, "amoCRM", "Кейс 4")
+
+    repo.set_clarification_asked(46, True)
+
+    assert repo.get_deal(46).clarification_asked is True
+
+
 def test_list_recent_activity_returns_latest_event_per_deal(repo):
     from core import timeutils
 

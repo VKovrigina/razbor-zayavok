@@ -36,6 +36,7 @@ def _patch_common(monkeypatch):
         state_machine.classify_client, "classify_sync", lambda text, case: ReplyCategory.AMBIGUOUS
     )
     monkeypatch.setattr(state_machine.checklist, "mentions_messaging_work", lambda text: False)
+    monkeypatch.setattr(state_machine.checklist, "assess", lambda stack, case: [])
     monkeypatch.setattr(state_machine.amo_actions, "get_lead_status_id", lambda deal_id: None)
 
     sent_messages = []
@@ -292,6 +293,49 @@ def test_positive_reply_full_spec_field_failure_does_not_block_escalation(repo, 
     deal = repo.get_deal(42)
     assert deal.status == Status.ESCALATED_POSITIVE
     assert sent_messages == [state_machine.templates.REPLY_POSITIVE]
+
+
+def test_positive_reply_with_missing_data_asks_clarification_instead_of_escalating(repo, monkeypatch):
+    manager_tasks, sent_messages = _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        state_machine.classify_client, "classify_sync", lambda text, case: ReplyCategory.POSITIVE
+    )
+    monkeypatch.setattr(state_machine.checklist, "describes_addition_to_case", lambda text: False)
+    monkeypatch.setattr(state_machine.checklist, "assess", lambda stack, case: ["stack"])
+
+    _make_deal_awaiting_reply(repo, 60)
+
+    _handle(60, "да, актуально")
+
+    deal = repo.get_deal(60)
+    assert deal.status == Status.AWAITING_REPLY_1  # НЕ эскалировано
+    assert deal.in_progress is False
+    assert deal.clarification_asked is True
+    assert sent_messages == [
+        state_machine.templates.clarify_missing_data_question(["stack"])
+    ]
+    assert manager_tasks == []  # задача Варваре не заводится — ещё не передано партнёрам
+
+
+def test_positive_reply_missing_data_second_time_escalates_anyway(repo, monkeypatch):
+    """Бот уже переспрашивал один раз (clarification_asked=True) — второй раз без деталей всё
+    равно эскалируем, чтобы не зависнуть навсегда (решение пользователя: лимит 1 переспрос)."""
+    manager_tasks, sent_messages = _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        state_machine.classify_client, "classify_sync", lambda text, case: ReplyCategory.POSITIVE
+    )
+    monkeypatch.setattr(state_machine.checklist, "describes_addition_to_case", lambda text: False)
+    monkeypatch.setattr(state_machine.checklist, "assess", lambda stack, case: ["stack"])
+
+    _make_deal_awaiting_reply(repo, 61)
+    repo.set_clarification_asked(61, True)
+
+    _handle(61, "да, актуально")
+
+    deal = repo.get_deal(61)
+    assert deal.status == Status.ESCALATED_POSITIVE
+    assert sent_messages == [state_machine.templates.REPLY_POSITIVE]
+    assert len(manager_tasks) == 1
 
 
 def _make_new_deal(repo, deal_id: int):
