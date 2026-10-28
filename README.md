@@ -79,6 +79,37 @@ python main.py
 `AMOCRM_POLL_INTERVAL_SECONDS`, по умолчанию 90 сек), шедулер напоминаний (раз в
 `SCHEDULER_TICK_SECONDS`, по умолчанию 60 сек) и, если настроен email, поллинг почты.
 
+Второй процесс — `python main_cases.py` (выдача кейсов партнёрам), запускается отдельно.
+
+## 6а. Сервер (systemd)
+
+Оба процесса — отдельные systemd-службы: `deploy/razbor-main.service` и
+`deploy/razbor-cases.service`. `Restart=always` поднимает процесс после любого падения, а
+встроенный сторож (`reporting/watchdog.py`) сам завершает зависший процесс — если цикл молчит
+дольше 20 минут или Telegram 3 проверки подряд не отвечает — с алертом в вебхук.
+
+**Переезд — строго в таком порядке:**
+1. Остановить агента на старой машине (оба процесса) и убедиться, что не запущен
+   (`ps aux | grep main`). Две копии на разных машинах = одна Telegram-сессия с двух мест:
+   Telegram может сбросить авторизацию, клиенты получат двойные сообщения. Блокировка
+   `data/*.lock` ловит второй запуск только на ОДНОЙ машине.
+2. Скопировать на сервер код, `.env` и всю папку `data/` (базы `app.db`, `app_cases.db`,
+   файлы `telegram.session`, `telegram_cases.session` — повторная авторизация не понадобится).
+3. `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt` (версии закреплены).
+4. В обоих `.service` заменить `AGENT_USER` и `/opt/razbor-zayavok`, скопировать в
+   `/etc/systemd/system/`, затем:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now razbor-main razbor-cases
+   journalctl -u razbor-main -f      # лог main.py
+   journalctl -u razbor-cases -f     # лог main_cases.py
+   ```
+   Объём логов ограничивает journald: в `/etc/systemd/journald.conf` задать, например,
+   `SystemMaxUse=200M` (и `sudo systemctl restart systemd-journald`). Шумные INFO-логи telethon
+   и httpx в коде приглушены до WARNING.
+5. Остановка/перезапуск — только `sudo systemctl stop|restart razbor-main` (SIGTERM = штатная
+   остановка, без ложного алерта о краше).
+
 ## 7. Проверка сценария
 
 1. Создайте тестовую сделку в воронке Partners на этапе «Новый контакт», с заполненным полем

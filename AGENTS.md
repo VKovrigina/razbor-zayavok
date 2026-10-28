@@ -57,7 +57,10 @@
 | `email_channel/` | IMAP-поллинг / SMTP-отправка (fallback) |
 | `db/` | SQLite repository + модели (`Status`, `Channel`, `ReplyCategory`, `Deal`) |
 | `tests/` | pytest — repository, timeutils, rule_based |
-| `data/` | Runtime state (создаётся при первом запуске) — сессия Telegram, sqlite, логи. **Не в git.** |
+| `data/` | Runtime state (создаётся при первом запуске) — сессия Telegram, sqlite, логи, `*.lock`. **Не в git.** |
+| `reporting/watchdog.py` | Сторож обоих процессов: зависший цикл (> 20 мин без отметки `beat`) или неотвечающий Telegram → алерт + выход с кодом 1 (поднимает systemd) |
+| `core/process_lock.py` | Блокировка `data/{name}.lock` — второй экземпляр процесса на той же машине не стартует |
+| `deploy/` | systemd-службы `razbor-main.service`, `razbor-cases.service` (`Restart=always`); порядок переезда — README «Сервер» |
 | `README.md` | Установка `.env`, первый запуск, проверка сценария |
 | `Логика ИИ агента.md` | Исходное ТЗ сценария (до кода) |
 | `RESEARCH.md` | Deep dive по архитектуре — читать полностью перед первой задачей |
