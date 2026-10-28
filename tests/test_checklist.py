@@ -1,4 +1,5 @@
 import dataclasses
+from types import SimpleNamespace
 
 from core import checklist
 from config import settings as base_settings
@@ -50,6 +51,70 @@ def test_case_detailed_passes_without_llm_fallback(monkeypatch):
 def test_both_fields_missing(monkeypatch):
     _no_llm(monkeypatch)
     assert checklist.assess(None, None) == ["stack", "case"]
+
+
+# --- assess с LLM: сервисы считает Claude по стеку И тексту задачи (одним вызовом) ---
+
+class _FakeMessages:
+    def __init__(self, tool_input):
+        self.tool_input = tool_input
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.tool_input is None:
+            return SimpleNamespace(content=[SimpleNamespace(type="text", text="...")])
+        block = SimpleNamespace(type="tool_use", name="assess_case", input=self.tool_input)
+        return SimpleNamespace(content=[block])
+
+
+def _fake_llm(monkeypatch, tool_input):
+    key_settings = dataclasses.replace(base_settings, anthropic_api_key="test-key")
+    monkeypatch.setattr("core.checklist.settings", key_settings)
+    messages = _FakeMessages(tool_input)
+    monkeypatch.setattr("core.checklist._client", SimpleNamespace(messages=messages))
+    return messages
+
+
+def test_llm_two_services_without_separator_passes(monkeypatch):
+    # Сделка 40217503: «сеилбот битрикс» — два сервиса через пробел, регулярка видела один
+    _fake_llm(monkeypatch, {"has_two_services": True, "describes_problem_or_data": True})
+    assert checklist.assess("сеилбот битрикс", "Заявка из бота в сеилботе попадает в битрикс") == []
+
+
+def test_llm_one_service_flagged(monkeypatch):
+    _fake_llm(monkeypatch, {"has_two_services": False, "describes_problem_or_data": True})
+    assert checklist.assess("Авито", "Нужна консультация по интеграции") == ["stack"]
+
+
+def test_llm_single_call_sees_stack_and_case(monkeypatch):
+    messages = _fake_llm(monkeypatch, {"has_two_services": True, "describes_problem_or_data": True})
+    checklist.assess("Posiflora", "Передавать заказы из формы Tilda в Posiflora")
+    assert len(messages.calls) == 1
+    content = messages.calls[0]["messages"][0]["content"]
+    assert "Posiflora" in content and "Tilda" in content
+
+
+def test_llm_empty_case_flagged_but_stack_checked(monkeypatch):
+    messages = _fake_llm(monkeypatch, {"has_two_services": True, "describes_problem_or_data": True})
+    assert checklist.assess("amoCRM Telegram", "") == ["case"]
+    assert len(messages.calls) == 1
+
+
+def test_llm_both_empty_no_call(monkeypatch):
+    messages = _fake_llm(monkeypatch, {"has_two_services": True, "describes_problem_or_data": True})
+    assert checklist.assess(None, "  ") == ["stack", "case"]
+    assert messages.calls == []
+
+
+def test_llm_missing_services_field_flags_stack(monkeypatch):
+    _fake_llm(monkeypatch, {"describes_problem_or_data": True})
+    assert checklist.assess("amoCRM Telegram", "Передавать лиды из бота в CRM") == ["stack"]
+
+
+def test_llm_no_tool_use_flags_both(monkeypatch):
+    _fake_llm(monkeypatch, None)
+    assert checklist.assess("amoCRM Telegram", "Передавать лиды из бота в CRM") == ["stack", "case"]
 
 
 # --- assess_topic (тематические чек-листы, keyword-фолбэк без LLM) ---

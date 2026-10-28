@@ -28,12 +28,29 @@ def _count_services(stack_text: str | None) -> int:
 _TOOL = {
     "name": "assess_case",
     "description": (
-        "Оценить, достаточно ли текста поля 'Задача', чтобы партнёр-интегратор мог понять, "
-        "что нужно сделать."
+        "Оценить, достаточно ли полей 'Стек сервисов' и 'Задача', чтобы партнёр-интегратор мог "
+        "понять, что нужно сделать."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
+            # Список ПЕРЕД has_two_services: модель сначала выписывает сервисы, потом решает —
+            # без этого на пустой задаче она стабильно отвечала false на «Яндекс почта МАХ».
+            "services_found": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Все сервисы/системы из стека и задачи, по одному на элемент, без Альбато "
+                    "(«Яндекс почта МАХ» → [\"Яндекс почта\", \"МАХ\"])"
+                ),
+            },
+            "has_two_services": {
+                "type": "boolean",
+                "description": (
+                    "true, если по стеку и задаче вместе видно минимум два сервиса/системы, "
+                    "которые нужно связать (правила — в system prompt)"
+                ),
+            },
             "describes_problem_or_data": {
                 "type": "boolean",
                 "description": (
@@ -42,55 +59,89 @@ _TOOL = {
                 ),
             }
         },
-        "required": ["describes_problem_or_data"],
+        "required": ["services_found", "has_two_services", "describes_problem_or_data"],
     },
 }
 
 _SYSTEM_PROMPT = """Ты помогаешь оценить полноту заявки клиента в партнёрском отделе Альбато.
-Тебе дан текст поля "Задача" из сделки. Верни true, если в тексте есть хотя бы одно из:
+Тебе даны поля сделки "Стек сервисов" и "Задача". Оцени два пункта.
+
+1) has_two_services — true, если по стеку и задаче ВМЕСТЕ видно минимум два сервиса/системы,
+которые нужно связать между собой. Сервисы могут быть записаны через пробел, тире, стрелку,
+предлог («сеилбот битрикс», «Озон - Яндекс Доставка», «Мой склад с Adesk») — это два сервиса.
+Считай достаточным (true) также, если:
+- второй сервис назван только в тексте задачи (стек «Posiflora», задача «из Tilda в Posiflora»);
+- это один и тот же сервис на двух аккаунтах («связать товары на двух аккаунтах МойСклад»);
+- вторая система упомянута без названия («заявки из формы ВК в нашу CRM», «с самописной CRM»).
+Сам Альбато (Albato) вторым сервисом НЕ считается — это платформа-связка.
+Верни false, если виден только один сервис и непонятно, с чем его связывать, или сервисов нет.
+Пункт 1 оценивай НЕЗАВИСИМО от пункта 2: если в стеке названы два сервиса, это true, даже когда
+задача пустая или непонятная («Авито в макс», «Яндекс почта МАХ», «сеилбот битрикс» без задачи —
+true). Пустота задачи учитывается только в пункте 2.
+
+2) describes_problem_or_data — true, если в задаче есть хотя бы одно из:
 - описана проблема/цель клиента, которую нужно решить с помощью интеграции;
 - описано, какие данные нужно обрабатывать (что откуда куда передавать, какие поля/события).
-Верни false, если текст пустой или слишком общий/бессмысленный («надо интеграцию», «нужна
+Верни false, если текст задачи пустой или слишком общий/бессмысленный («надо интеграцию», «нужна
 автоматизация», «настройте пожалуйста») и не даёт понять ни проблему, ни данные."""
 
 
-def _case_describes_problem_or_data(case_text: str | None) -> bool:
-    if not case_text or not case_text.strip():
-        return False
-
-    if not settings.anthropic_api_key:
-        # Без API-ключа — грубая эвристика (см. classify/rule_based.py: тот же принцип фолбэка).
-        return len(case_text.strip()) >= 15
-
+def _assess_with_llm(stack_text: str | None, case_text: str | None) -> tuple[bool, bool]:
+    """Один вызов Claude на оба пункта: (has_two_services, describes_problem_or_data).
+    Безопасный дефолт при пропущенном поле или отсутствии tool_use — False (пункт помечается)."""
     response = _client.messages.create(
         model=settings.anthropic_model,
-        max_tokens=100,
+        max_tokens=150,
         system=[{"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
         tools=[_TOOL],
         tool_choice={"type": "tool", "name": "assess_case"},
-        messages=[{"role": "user", "content": f"Текст поля 'Задача':\n{case_text}"}],
+        messages=[
+            {
+                "role": "user",
+                "content": f"Стек сервисов:\n{stack_text or '—'}\n\nЗадача:\n{case_text or '—'}",
+            }
+        ],
     )
     for block in response.content:
         if block.type == "tool_use" and block.name == "assess_case":
-            value = block.input.get("describes_problem_or_data")
-            if value is None:
-                logger.warning("assess_case: ответ модели без обязательного поля, считаем недостаточно")
-                return False
-            return bool(value)
-    logger.warning("assess_case: Claude не вернул tool_use, считаем что описания недостаточно")
-    return False
+            values = []
+            for field_name in ("has_two_services", "describes_problem_or_data"):
+                value = block.input.get(field_name)
+                if value is None:
+                    logger.warning(
+                        "assess_case: ответ модели без поля %s, считаем недостаточно", field_name
+                    )
+                values.append(bool(value))
+            return values[0], values[1]
+    logger.warning("assess_case: Claude не вернул tool_use, считаем что данных недостаточно")
+    return False, False
 
 
 def assess(stack_text: str | None, case_text: str | None) -> list[str]:
     """Возвращает список проблемных полей сделки:
-    - "stack" — названо меньше `MIN_SERVICES` сервисов;
+    - "stack" — не видно минимум `MIN_SERVICES` сервисов (Claude смотрит стек И задачу: второй
+      сервис может быть назван только в задаче, сервисы могут быть записаны через пробел);
     - "case" — не описана ни проблема клиента, ни данные для обработки.
+    Без API-ключа — грубый фолбэк: регулярка по разделителям стека и длина текста задачи.
     Не блокирует отправку сообщения — используется, чтобы вставить предупреждение о нехватке
     данных в основное сообщение (см. core/templates.py: first_message)."""
+    has_stack = bool(stack_text and stack_text.strip())
+    has_case = bool(case_text and case_text.strip())
+
+    if not has_stack and not has_case:
+        return ["stack", "case"]
+
+    if settings.anthropic_api_key:
+        services_ok, case_ok = _assess_with_llm(stack_text, case_text)
+    else:
+        # Без API-ключа — грубая эвристика (см. classify/rule_based.py: тот же принцип фолбэка).
+        services_ok = _count_services(stack_text) >= MIN_SERVICES
+        case_ok = len((case_text or "").strip()) >= 15
+
     issues: list[str] = []
-    if _count_services(stack_text) < MIN_SERVICES:
+    if not services_ok:
         issues.append("stack")
-    if not _case_describes_problem_or_data(case_text):
+    if not has_case or not case_ok:
         issues.append("case")
     return issues
 
@@ -301,7 +352,7 @@ def describes_addition_to_case(text: str | None) -> bool:
     if not text or not text.strip():
         return False
     if not settings.anthropic_api_key:
-        return len(text.strip()) >= 15  # тот же грубый фолбэк, что у _case_describes_problem_or_data
+        return len(text.strip()) >= 15  # тот же грубый фолбэк, что у assess без API-ключа
 
     response = _client.messages.create(
         model=settings.anthropic_model,
