@@ -87,7 +87,10 @@ class Settings:
     # Отчётность в вебхук (Albato) — P-014 в BACKLOG.md: видимость работы бота и уведомление о
     # краше, сам механизм реконнекта Telethon (main.py:44) не чинит.
     report_webhook_url: str = os.environ.get("REPORT_WEBHOOK_URL", "")
-    report_interval_seconds: int = _int("REPORT_INTERVAL_SECONDS", 7200)
+    # Часы отправки отчёта в вебхук по TIMEZONE (срочные алерты — сразу, не по расписанию)
+    report_hours_local: tuple = tuple(
+        int(h) for h in os.environ.get("REPORT_HOURS", "10,16").split(",") if h.strip()
+    )
 
     # Общие
     timezone: str = os.environ.get("TIMEZONE", "Europe/Moscow")

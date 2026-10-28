@@ -1,0 +1,23 @@
+# main.py — разбор заявок (amoCRM → Telegram/почта). Установка — см. README.md, раздел «Сервер».
+# Заменить AGENT_USER и /opt/razbor-zayavok на реальные пользователя и путь.
+[Unit]
+Description=Razbor zayavok: main.py (amoCRM -> Telegram/email agent)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=AGENT_USER
+WorkingDirectory=/opt/razbor-zayavok
+ExecStart=/opt/razbor-zayavok/.venv/bin/python main.py
+# Сторож (reporting/watchdog.py) при зависании завершает процесс с кодом 1 — systemd поднимает
+# его снова. Так же после любого падения.
+Restart=always
+RestartSec=10
+# SIGTERM — штатная остановка: main.py ставит флаг, и следующий запуск не шлёт алерт о краше.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
