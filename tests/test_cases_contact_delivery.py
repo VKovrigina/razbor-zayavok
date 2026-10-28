@@ -29,9 +29,9 @@ def _patch_extract_lead_data(monkeypatch, telegram_username="client_username", n
     )
 
 
-def _fake_create_group(link="https://t.me/+link"):
-    async def _create(partner_id, title):
-        return link
+def _fake_create_group(link="https://t.me/+link", warnings=None):
+    async def _create(partner_id, title, intro_text):
+        return link, list(warnings or [])
 
     return _create
 
@@ -61,9 +61,9 @@ def test_deliver_contact_tg_branch_passes_client_nick_as_group_title(cases_repo,
 
     titles = []
 
-    async def fake_create_group(partner_id, title):
+    async def fake_create_group(partner_id, title, intro_text):
         titles.append(title)
-        return "https://t.me/+link"
+        return "https://t.me/+link", []
 
     monkeypatch.setattr(contact_delivery.group_creator, "create_group_with_invite", fake_create_group)
     monkeypatch.setattr(contact_delivery.group_creator, "send_dm", _async_noop)
@@ -102,12 +102,54 @@ def test_deliver_contact_tg_branch_sends_distinct_messages_to_client_and_partner
     assert by_target[555] == "Чат для обсуждения интеграции:\n🔸Сервисы: amoCRM\nhttps://t.me/+link"
 
 
+def test_deliver_contact_tg_branch_posts_case_intro_into_chat(cases_repo, monkeypatch):
+    cases_repo.insert_posted(1, 100)
+    monkeypatch.setattr(
+        contact_delivery.amo_client, "get_lead",
+        lambda deal_id, with_contacts=False: _lead_with_tag("ТГ", full_spec="🔸Сервисы: amoCRM"),
+    )
+    _patch_extract_lead_data(monkeypatch)
+    intros = []
+
+    async def fake_create_group(partner_id, title, intro_text):
+        intros.append(intro_text)
+        return "https://t.me/+link", []
+
+    monkeypatch.setattr(contact_delivery.group_creator, "create_group_with_invite", fake_create_group)
+    monkeypatch.setattr(contact_delivery.group_creator, "send_dm", _async_noop)
+
+    asyncio.run(contact_delivery.deliver_contact(1, 100, 555))
+
+    assert intros == ["Чат для обсуждения\n\n🔸Сервисы: amoCRM"]
+
+
+def test_deliver_contact_tg_branch_optional_step_warning_alerts_but_succeeds(cases_repo, monkeypatch):
+    cases_repo.insert_posted(1, 100)
+    monkeypatch.setattr(contact_delivery.amo_client, "get_lead", lambda deal_id, with_contacts=False: _lead_with_tag("ТГ"))
+    _patch_extract_lead_data(monkeypatch)
+    monkeypatch.setattr(
+        contact_delivery.group_creator, "create_group_with_invite",
+        _fake_create_group(warnings=["не удалось добавить чат в папку «Настройки»"]),
+    )
+    monkeypatch.setattr(contact_delivery.group_creator, "send_dm", _async_noop)
+    alerts = []
+    monkeypatch.setattr(
+        contact_delivery.report_webhook, "send_error_notification",
+        lambda marker, message: alerts.append((marker, message)),
+    )
+
+    asyncio.run(contact_delivery.deliver_contact(1, 100, 555))
+
+    assert cases_repo.get_case(1).status == CaseStatus.GROUP_CREATED
+    assert len(alerts) == 1 and alerts[0][0] == "100" and "Настройки" in alerts[0][1]
+
+
 def test_deliver_contact_tg_branch_failure_alerts_and_sets_failed_group_creation(cases_repo, monkeypatch):
     cases_repo.insert_posted(1, 100)
     monkeypatch.setattr(contact_delivery.amo_client, "get_lead", lambda deal_id, with_contacts=False: _lead_with_tag("ТГ"))
     _patch_extract_lead_data(monkeypatch)
 
-    async def failing_create_group(partner_id, title):
+    async def failing_create_group(partner_id, title, intro_text):
         raise RuntimeError("telethon недоступен")
 
     monkeypatch.setattr(contact_delivery.group_creator, "create_group_with_invite", failing_create_group)
@@ -131,7 +173,7 @@ def test_deliver_contact_tg_branch_does_not_notify_partner_on_failure(cases_repo
     monkeypatch.setattr(contact_delivery.amo_client, "get_lead", lambda deal_id, with_contacts=False: _lead_with_tag("ТГ"))
     _patch_extract_lead_data(monkeypatch)
 
-    async def failing_create_group(partner_id, title):
+    async def failing_create_group(partner_id, title, intro_text):
         raise RuntimeError("telethon недоступен")
 
     monkeypatch.setattr(contact_delivery.group_creator, "create_group_with_invite", failing_create_group)
@@ -168,6 +210,7 @@ def test_deliver_contact_email_branch_sends_name_and_email_sets_contact_sent(cas
     assert sent[0][0] == 555
     assert "Иван Клиент" in sent[0][1]
     assert "ivan@example.com" in sent[0][1]
+    assert "Текст ТЗ" in sent[0][1]  # сам кейс, а не только контакт
 
 
 def test_deliver_contact_email_branch_failure_alerts_and_sets_failed_contact_send(cases_repo, monkeypatch):
@@ -232,3 +275,29 @@ def test_deliver_contact_no_tags_at_all_alerts_and_sets_failed_channel_unknown(c
     asyncio.run(contact_delivery.deliver_contact(1, 100, 555))
 
     assert cases_repo.get_case(1).status == CaseStatus.FAILED_CHANNEL_UNKNOWN
+
+
+def test_deliver_contact_get_lead_failure_alerts_with_partner_nick(cases_repo, monkeypatch):
+    cases_repo.insert_posted(1, 100)
+    cases_repo.claim_case(1, 555, "@ivan_partner")
+    attempts = []
+
+    def broken_get_lead(deal_id, with_contacts=False):
+        attempts.append(deal_id)
+        raise ConnectionError("amo down")
+
+    async def no_sleep(seconds):
+        return None
+
+    monkeypatch.setattr(contact_delivery.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(contact_delivery.amo_client, "get_lead", broken_get_lead)
+    alerts = []
+    monkeypatch.setattr(
+        contact_delivery.report_webhook, "send_error_notification", lambda marker, message: alerts.append(message)
+    )
+
+    asyncio.run(contact_delivery.deliver_contact(1, 100, 555))
+
+    assert len(attempts) == 3
+    assert cases_repo.get_case(1).status == CaseStatus.FAILED_CONTACT_SEND
+    assert len(alerts) == 1 and "@ivan_partner" in alerts[0]

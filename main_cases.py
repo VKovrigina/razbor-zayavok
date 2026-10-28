@@ -11,12 +11,18 @@ from cases.bot import bot, dp
 from cases.poller import poll_loop as cases_poll_loop
 from cases.repository import init_db
 from config import settings
+from core import process_lock
+from reporting import watchdog
 
+# В stdout, как main.py: на сервере логи собирает journald (systemd), он же ограничивает объём.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    filename="data/main_cases.log",
 )
+# INFO telethon (подключения/переподключения) и httpx (каждый HTTP-запрос) — больше половины
+# строк лога без пользы; ошибки и предупреждения этих библиотек остаются.
+logging.getLogger("telethon").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -32,6 +38,7 @@ def _mark_clean_shutdown(signum, _frame) -> None:
 
 
 async def main() -> None:
+    process_lock.acquire("main_cases")
     settings.validate_cases()
     init_db()
 
@@ -51,6 +58,14 @@ async def main() -> None:
         # bot_running не сбрасывается и процесс не завершается (найдено на реальном e2e-прогоне
         # 2026-07-31). Единый обработчик сигналов — из main_cases.py, как у main.py.
         asyncio.create_task(dp.start_polling(bot, handle_signals=False), name="cases_bot_polling"),
+        asyncio.create_task(
+            watchdog.watchdog_loop(
+                "main_cases.py",
+                {"cases_poll": watchdog.LOOP_SILENCE_LIMIT_SECONDS},
+                group_creator.get_client(),
+            ),
+            name="watchdog",
+        ),
     ]
 
     logger.info(

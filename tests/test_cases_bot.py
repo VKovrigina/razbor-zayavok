@@ -205,3 +205,84 @@ def test_handle_case_claim_non_numeric_callback_data_handled_gracefully(cases_re
     asyncio.run(bot_module.handle_case_claim(callback))  # не должно бросить исключение
 
     assert callback.answers == [(None, None)]
+
+
+# --- Пункт 4 аудита 2026-10-28: сбой «необязательных» шагов не обрывает доставку ---
+
+import pytest
+
+
+@pytest.fixture()
+def claim_env(cases_repo, monkeypatch):
+    cases_repo.insert_posted(1, 100)
+    monkeypatch.setattr(bot_module, "repo", cases_repo)
+    monkeypatch.setattr(bot_module.bot, "get_chat_member", _fake_get_chat_member(ChatMemberStatus.MEMBER))
+
+    async def no_sleep(seconds):
+        return None
+
+    monkeypatch.setattr(bot_module.asyncio, "sleep", no_sleep)
+    env = {"crm": [], "delivered": [], "alerts": []}
+    monkeypatch.setattr(
+        bot_module.amo_client, "update_lead_status_and_field", lambda *a: env["crm"].append(a)
+    )
+
+    async def deliver(task_id, deal_id, partner_id):
+        env["delivered"].append(task_id)
+
+    monkeypatch.setattr(bot_module.contact_delivery, "deliver_contact", deliver)
+    monkeypatch.setattr(
+        bot_module.report_webhook, "send_error_notification", lambda marker, message: env["alerts"].append(message)
+    )
+    return env
+
+
+def test_edit_text_failure_does_not_stop_crm_and_delivery(claim_env):
+    class BrokenMessage(FakeMessage):
+        async def edit_text(self, text):
+            raise RuntimeError("Bad Request: MESSAGE_TOO_LONG")
+
+    asyncio.run(bot_module.handle_case_claim(FakeCallback("case:1", message=BrokenMessage())))
+    assert len(claim_env["crm"]) == 1 and claim_env["delivered"] == [1]
+
+
+def test_old_callback_answer_failure_does_not_stop_crm_and_delivery(claim_env):
+    class OldCallback(FakeCallback):
+        async def answer(self, text=None, show_alert=None):
+            raise RuntimeError("Bad Request: query is too old and response timeout expired")
+
+    asyncio.run(bot_module.handle_case_claim(OldCallback("case:1")))
+    assert len(claim_env["crm"]) == 1 and claim_env["delivered"] == [1]
+
+
+def test_long_case_text_shortened_with_claimed_suffix(claim_env):
+    message = FakeMessage(text="а" * 5000)
+    asyncio.run(bot_module.handle_case_claim(FakeCallback("case:1", message=message)))
+    assert len(message.edited_text) <= 4096 and "✅ Взял:" in message.edited_text
+
+
+def test_crm_retried_then_succeeds_without_alert(claim_env, monkeypatch, cases_repo):
+    attempts = []
+
+    def flaky(*args):
+        attempts.append(args)
+        if len(attempts) < 3:
+            raise ConnectionError("Remote end closed connection without response")
+
+    monkeypatch.setattr(bot_module.amo_client, "update_lead_status_and_field", flaky)
+    asyncio.run(bot_module.handle_case_claim(FakeCallback("case:1")))
+    assert len(attempts) == 3 and claim_env["alerts"] == []
+    assert cases_repo.get_case(1).status == CaseStatus.CLAIMED
+
+
+def test_crm_fails_three_times_alerts_and_still_delivers(claim_env, monkeypatch, cases_repo):
+    attempts = []
+
+    def broken(*args):
+        attempts.append(args)
+        raise ConnectionError("amo down")
+
+    monkeypatch.setattr(bot_module.amo_client, "update_lead_status_and_field", broken)
+    asyncio.run(bot_module.handle_case_claim(FakeCallback("case:1")))
+    assert len(attempts) == 3 and len(claim_env["alerts"]) == 1
+    assert claim_env["delivered"] == [1]

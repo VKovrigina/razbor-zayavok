@@ -27,3 +27,9 @@ def cases_repo(tmp_path, monkeypatch):
 
     cases_repository_module.init_db()
     return cases_repository_module
+
+
+@pytest.fixture(autouse=True)
+def _no_amo_retry_delays(monkeypatch):
+    """Повторы запросов к amoCRM (cases/amo_retry.py) ждут 10 и 30 с — в тестах без пауз."""
+    monkeypatch.setattr("cases.amo_retry._RETRY_DELAYS_SECONDS", (0, 0))

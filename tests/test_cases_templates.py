@@ -38,8 +38,14 @@ def test_partner_invite_message_format():
     )
 
 
-def test_email_contact_message_format():
-    assert templates.email_contact_message("Иван Клиент", "ivan@example.com") == (
+def test_email_contact_message_includes_case_before_contact():
+    assert templates.email_contact_message("Текст ТЗ", "Иван Клиент", "ivan@example.com") == (
+        "Контакт клиента по кейсу:\nТекст ТЗ\n\nИван Клиент\nivan@example.com"
+    )
+
+
+def test_email_contact_message_without_case_only_contact():
+    assert templates.email_contact_message(None, "Иван Клиент", "ivan@example.com") == (
         "Контакт клиента по кейсу:\nИван Клиент\nivan@example.com"
     )
 
@@ -48,3 +54,26 @@ def test_case_announcement_text_is_pass_through():
     assert templates.case_announcement_text("🔸Сервисы: amoCRM\n🔸Задача: тест") == (
         "🔸Сервисы: amoCRM\n🔸Задача: тест"
     )
+
+
+def test_discussion_chat_intro_with_case():
+    assert templates.discussion_chat_intro("Текст ТЗ") == "Чат для обсуждения\n\nТекст ТЗ"
+
+
+def test_discussion_chat_intro_without_case():
+    assert templates.discussion_chat_intro(None) == "Чат для обсуждения"
+
+
+def _utf16_len(text):
+    return len(text.encode("utf-16-le")) // 2
+
+
+def test_claimed_text_short_appends_suffix():
+    assert templates.claimed_text("Текст кейса", "@ivan") == "Текст кейса\n\n✅ Взял: @ivan"
+
+
+def test_claimed_text_long_is_shortened_to_telegram_limit():
+    text = "🔸" + "а" * 5000
+    result = templates.claimed_text(text, "@ivan_partner")
+    assert _utf16_len(result) <= 4096
+    assert result.endswith("…\n\n✅ Взял: @ivan_partner")

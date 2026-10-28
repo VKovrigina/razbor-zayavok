@@ -192,3 +192,128 @@ def test_poll_once_processes_tasks_strictly_sequentially_not_gathered(cases_repo
     asyncio.run(poller.poll_once())
 
     assert order == ["start:1", "end:1", "start:2", "end:2"]
+
+
+# --- Пункт 3 аудита 2026-10-28: публикация отдельно от шагов amoCRM, повторы перед алертом ---
+
+import pytest
+from aiogram.exceptions import TelegramRetryAfter
+
+
+@pytest.fixture()
+def no_sleep(monkeypatch):
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(poller.asyncio, "sleep", fake_sleep)
+    return sleeps
+
+
+def _flaky(fail_times, calls, name):
+    state = {"n": 0}
+
+    def call(*args):
+        state["n"] += 1
+        calls.append(name)
+        if state["n"] <= fail_times:
+            raise ConnectionError("Remote end closed connection without response")
+
+    return call
+
+
+def _alerts(monkeypatch):
+    sent = []
+    monkeypatch.setattr(poller.report_webhook, "send_error_notification", lambda marker, message: sent.append(message))
+    return sent
+
+
+def test_amo_stage_retried_then_succeeds_without_alert(cases_repo, monkeypatch, no_sleep):
+    calls = []
+    _patch_happy_publish(monkeypatch, calls)
+    monkeypatch.setattr(poller.amo_client, "update_lead_status", _flaky(2, calls, "stage"))
+    alerts = _alerts(monkeypatch)
+
+    asyncio.run(poller.process_task(_task(1, 100)))
+
+    assert calls.count("stage") == 3
+    assert alerts == []
+    assert cases_repo.get_case(1).status == CaseStatus.POSTED
+
+
+def test_amo_stage_fails_three_times_alerts_keeps_posted_and_completes_task(cases_repo, monkeypatch, no_sleep):
+    calls = []
+    _patch_happy_publish(monkeypatch, calls)
+    monkeypatch.setattr(poller.amo_client, "update_lead_status", _flaky(99, calls, "stage"))
+    alerts = _alerts(monkeypatch)
+
+    asyncio.run(poller.process_task(_task(1, 100)))
+
+    assert calls.count("stage") == 3
+    assert any(c[0] == "complete_task" for c in calls if isinstance(c, tuple))
+    assert len(alerts) == 1 and "этап" in alerts[0]
+    assert cases_repo.get_case(1).status == CaseStatus.POSTED
+
+
+def test_complete_task_fails_three_times_alerts_keeps_posted(cases_repo, monkeypatch, no_sleep):
+    calls = []
+    _patch_happy_publish(monkeypatch, calls)
+    monkeypatch.setattr(poller.amo_client, "complete_task", _flaky(99, calls, "complete"))
+    alerts = _alerts(monkeypatch)
+
+    asyncio.run(poller.process_task(_task(1, 100)))
+
+    assert calls.count("complete") == 3
+    assert len(alerts) == 1 and "задача" in alerts[0]
+    assert cases_repo.get_case(1).status == CaseStatus.POSTED
+
+
+def test_publish_retry_after_waits_and_retries(cases_repo, monkeypatch, no_sleep):
+    calls = []
+    _patch_happy_publish(monkeypatch, calls)
+    attempts = []
+
+    async def send(chat_id, text, reply_markup=None, message_thread_id=None):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise TelegramRetryAfter(method=None, message="Flood control", retry_after=7)
+
+    monkeypatch.setattr(poller.bot, "send_message", send)
+
+    asyncio.run(poller.process_task(_task(1, 100)))
+
+    assert len(attempts) == 2 and 7 in no_sleep
+    assert cases_repo.get_case(1).status == CaseStatus.POSTED
+
+
+def test_publish_other_error_not_retried_alert_says_check_group(cases_repo, monkeypatch, no_sleep):
+    _patch_happy_publish(monkeypatch, [])
+    attempts = []
+
+    async def send(chat_id, text, reply_markup=None, message_thread_id=None):
+        attempts.append(1)
+        raise TimeoutError("request timeout")
+
+    monkeypatch.setattr(poller.bot, "send_message", send)
+    alerts = _alerts(monkeypatch)
+
+    asyncio.run(poller.process_task(_task(1, 100)))
+
+    assert len(attempts) == 1
+    assert cases_repo.get_case(1).status == CaseStatus.FAILED_PUBLISH
+    assert len(alerts) == 1 and "проверьте группу" in alerts[0]
+
+
+def test_publish_retry_after_three_times_fails(cases_repo, monkeypatch, no_sleep):
+    _patch_happy_publish(monkeypatch, [])
+
+    async def send(chat_id, text, reply_markup=None, message_thread_id=None):
+        raise TelegramRetryAfter(method=None, message="Flood control", retry_after=5)
+
+    monkeypatch.setattr(poller.bot, "send_message", send)
+    _alerts(monkeypatch)
+
+    asyncio.run(poller.process_task(_task(1, 100)))
+
+    assert cases_repo.get_case(1).status == CaseStatus.FAILED_PUBLISH

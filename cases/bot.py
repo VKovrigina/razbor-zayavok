@@ -11,6 +11,7 @@ from amo.client import amo_client
 from cases import contact_delivery
 from cases import repository as repo
 from cases import templates
+from cases.amo_retry import amo_with_retries
 from cases.models import CaseStatus
 from config import settings
 from reporting import webhook as report_webhook
@@ -69,12 +70,20 @@ async def handle_case_claim(callback: CallbackQuery) -> None:
     case = await asyncio.to_thread(repo.get_case, task_id)
     deal_id = case.deal_id
 
-    new_text = (callback.message.text or "") + templates.claimed_suffix(nick)
-    await callback.message.edit_text(new_text)
-    await callback.answer()
+    # «✅ Взял» в сообщении и ответ на нажатие — необязательные шаги (пункт 4 аудита 2026-10-28):
+    # раньше их сбой обрывал всё дальше — кейс закреплён, а CRM и доставки нет, алерта нет. Ответ
+    # падает, например, на нажатиях, накопившихся за время простоя: "query is too old" (24.08).
+    try:
+        await callback.message.edit_text(templates.claimed_text(callback.message.text or "", nick))
+    except Exception:
+        logger.exception("Не удалось отметить взятие в сообщении кейса (task_id=%s)", task_id)
+    try:
+        await callback.answer()
+    except Exception:
+        logger.warning("Не удалось ответить на нажатие «Беру» (task_id=%s)", task_id, exc_info=True)
 
     try:
-        await asyncio.to_thread(
+        await amo_with_retries(
             amo_client.update_lead_status_and_field,
             deal_id,
             settings.amocrm_stage_taken_by_partner_id,

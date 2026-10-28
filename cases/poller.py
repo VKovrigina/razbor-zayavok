@@ -3,14 +3,18 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from aiogram.exceptions import TelegramRetryAfter
+
 from amo.actions import get_field_value
 from amo.client import amo_client
 from cases import repository as repo
+from cases.amo_retry import amo_with_retries
 from cases import templates
 from cases.bot import bot, case_claim_keyboard
 from cases.crash import update_heartbeat
 from cases.models import CaseStatus
 from config import settings
+from reporting import watchdog
 from reporting import webhook as report_webhook
 
 logger = logging.getLogger(__name__)
@@ -19,6 +23,8 @@ TRIGGER_TEXT = "Клиент согласовал условия — оформ�
 
 _KV_ALERTED_GUARD2_PREFIX = "alerted:guard2:"
 _KV_ALERTED_GUARD3_PREFIX = "alerted:guard3:"
+
+_PUBLISH_ATTEMPTS = 3
 
 
 def list_trigger_tasks() -> list[dict]:
@@ -90,32 +96,70 @@ async def process_task(task: dict) -> None:
     if not inserted:
         return  # гонка: другой цикл поллинга уже вставил эту же задачу
 
+    # Публикация и шаги amoCRM — раздельно (пункт 3 аудита 2026-10-28): раньше сбой amoCRM ПОСЛЕ
+    # публикации ставил FAILED_PUBLISH, хотя кейс уже висел в группе с кнопкой, а взять его можно
+    # только из POSTED — каждый партнёр получал «Уже взято». Анти-спам флаги алертов не нужны:
+    # guard 1 (task_exists) блокирует повторную обработку task_id.
     try:
-        text = templates.case_announcement_text(full_spec)
-        await bot.send_message(
-            settings.telegram_group_id,
-            text,
-            reply_markup=case_claim_keyboard(task_id),
-            message_thread_id=settings.telegram_cases_topic_id,
-        )
-        await asyncio.to_thread(
-            amo_client.update_lead_status, deal_id, settings.amocrm_stage_sent_to_group_id
-        )
-        await asyncio.to_thread(amo_client.complete_task, task_id)
+        await _publish(templates.case_announcement_text(full_spec), task_id)
     except Exception:
         logger.exception("Сбой публикации кейса (task_id=%s, deal_id=%s)", task_id, deal_id)
-        # Анти-спам флаг не нужен: guard 1 (task_exists) гарантированно заблокирует повторную
-        # обработку этого же task_id на всех следующих циклах — алерт физически не может уйти
-        # больше одного раза.
-        try:
-            await asyncio.to_thread(
-                report_webhook.send_error_notification,
-                marker=str(deal_id),
-                message=f"Не удалось опубликовать кейс (task_id={task_id}) — разобрать вручную",
-            )
-        except Exception:
-            logger.exception("Не удалось отправить алерт о сбое публикации (task_id=%s)", task_id)
+        await _alert(
+            deal_id,
+            f"Не удалось опубликовать кейс (task_id={task_id}) — возможно, сообщение всё же "
+            "дошло: проверьте группу перед повторной публикацией",
+        )
         await asyncio.to_thread(repo.set_status, task_id, CaseStatus.FAILED_PUBLISH)
+        return
+
+    try:
+        await amo_with_retries(
+            amo_client.update_lead_status, deal_id, settings.amocrm_stage_sent_to_group_id
+        )
+    except Exception:
+        logger.exception("Кейс опубликован, этап сделки не обновлён (task_id=%s)", task_id)
+        await _alert(
+            deal_id,
+            f"Кейс опубликован (task_id={task_id}), но этап сделки в amoCRM не обновлён — "
+            "поставить «Отправлено в группу» вручную",
+        )
+    try:
+        await amo_with_retries(amo_client.complete_task, task_id)
+    except Exception:
+        logger.exception("Кейс опубликован, задача-триггер не закрыта (task_id=%s)", task_id)
+        await _alert(
+            deal_id,
+            f"Кейс опубликован (task_id={task_id}), но задача-триггер в amoCRM не закрыта — "
+            "закрыть вручную",
+        )
+
+
+async def _publish(text: str, task_id: int) -> None:
+    """Повтор только при RetryAfter — Telegram явно не опубликовал и просит подождать. Остальные
+    ошибки (в т.ч. таймаут) не повторяем: сообщение могло дойти, повтор дал бы второй пост."""
+    for attempt in range(_PUBLISH_ATTEMPTS):
+        try:
+            await bot.send_message(
+                settings.telegram_group_id,
+                text,
+                reply_markup=case_claim_keyboard(task_id),
+                message_thread_id=settings.telegram_cases_topic_id,
+            )
+            return
+        except TelegramRetryAfter as exc:
+            if attempt == _PUBLISH_ATTEMPTS - 1:
+                raise
+            logger.warning("Публикация кейса %s: RetryAfter %s с", task_id, exc.retry_after)
+            await asyncio.sleep(exc.retry_after)
+
+
+async def _alert(deal_id: int, message: str) -> None:
+    try:
+        await asyncio.to_thread(
+            report_webhook.send_error_notification, marker=str(deal_id), message=message
+        )
+    except Exception:
+        logger.exception("Не удалось отправить алерт (deal_id=%s): %s", deal_id, message)
 
 
 async def poll_once() -> None:
@@ -123,6 +167,7 @@ async def poll_once() -> None:
     триггер-задачах одной сделки в одном батче (решено 2026-07-31)."""
     tasks = await asyncio.to_thread(list_trigger_tasks)
     for task in tasks:
+        watchdog.beat("cases_poll")
         await process_task(task)
 
 
@@ -136,4 +181,5 @@ async def poll_loop() -> None:
             await asyncio.to_thread(update_heartbeat)
         except Exception:
             logger.exception("Не удалось записать heartbeat main_cases.py")
+        watchdog.beat("cases_poll")
         await asyncio.sleep(settings.amocrm_poll_interval_seconds)
