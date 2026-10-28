@@ -5,6 +5,16 @@
 
 ## [Unreleased]
 
+### Removed
+- **Сценарий "Партнеры - интеграторы" (`main_calls.py`) убран в архив (2026-10-28):** процесс не
+  нужен, последний запуск — 2026-08-20. Код (`main_calls.py`, `calls/`, `tests/test_calls_*.py`)
+  и данные (`data/app_calls.db`, `data/main_calls.log`, `data/telegram_calls.session`) перенесены
+  в `~/Work/_архив/main_calls/` (там же `README.md` — как вернуть). Из `config.py` убраны
+  настройки `amocrm_calls_*`, `calendar_*`, `db_calls_path`, `telegram_calls_session_path`,
+  `daily_telegram_calls_send_cap` и `validate_calls()`; из `requirements.txt` — `caldav`,
+  `icalendar`, `recurring-ical-events`; блок звонков из `.env.example`. `main.py`/`main_cases.py`
+  не затронуты; набор тестов 325 → 246 (минус 79 тестов сценария), зелёный.
+
 ### Fixed
 - **`main.py`/`main_cases.py` зависали навсегда при "зомби"-telethon-соединении (2026-09-11/15,
   P-068):** после сетевого сбоя telethon-соединение иногда оставалось выглядящим подключённым, но

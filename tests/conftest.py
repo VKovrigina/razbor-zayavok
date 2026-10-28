@@ -27,15 +27,3 @@ def cases_repo(tmp_path, monkeypatch):
 
     cases_repository_module.init_db()
     return cases_repository_module
-
-
-@pytest.fixture()
-def calls_repo(tmp_path, monkeypatch):
-    """calls.repository, направленный на временную SQLite-базу (не трогает data/app_calls.db)."""
-    test_settings = dataclasses.replace(base_settings, db_calls_path=str(tmp_path / "test_calls.db"))
-    monkeypatch.setattr("calls.repository.settings", test_settings)
-
-    from calls import repository as calls_repository_module
-
-    calls_repository_module.init_db()
-    return calls_repository_module
