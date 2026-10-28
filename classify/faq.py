@@ -8,7 +8,10 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+# По умолчанию SDK ждёт ответа до 10 минут на попытку (с 2 повторами — до 30 минут), всё это
+# время сделка заблокирована. Классификация отвечает за секунды.
+_CLAUDE_TIMEOUT_SECONDS = 60.0
+_client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=_CLAUDE_TIMEOUT_SECONDS)
 
 # Все пункты FAQ_ENTRIES сейчас заполнены реальными фактами. _PLACEHOLDER_MARKER/_USABLE_ENTRIES
 # остаются как защита на будущее: если сюда добавят черновик "[ЗАПОЛНИТЬ: ...]", он физически не

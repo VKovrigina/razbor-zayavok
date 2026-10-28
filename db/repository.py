@@ -293,7 +293,11 @@ def get_deal_by_email(email_address: str) -> Deal | None:
 # ---------------------------------------------------------------------------
 
 def list_due_rows(now_iso_value: str) -> list[Deal]:
-    statuses = tuple(s.value for s in AWAITING_STATUSES if s != Status.CLOSED_NO_REPLY)
+    statuses = tuple(
+        s.value
+        for s in AWAITING_STATUSES
+        if s not in (Status.CLOSED_NO_REPLY, Status.CLOSED_NOT_RELEVANT)
+    )
     placeholders = ",".join("?" for _ in statuses)
     with _connect() as conn:
         rows = conn.execute(
@@ -336,6 +340,19 @@ def unlock(deal_id: int) -> None:
             "UPDATE deals SET in_progress = 0, updated_at = ? WHERE deal_id = ?",
             (now_iso(), deal_id),
         )
+
+
+def release_all_locks() -> list[int]:
+    """Снимает все блокировки при старте main.py. Блокировка живёт в БД, и если процесс
+    завершился, держа её (SIGTERM/сторож — os._exit, падение), сделка выпадала из работы навсегда:
+    шедулер её не берёт, ответы клиента отбрасываются (сделки 39649375, 40064126, 40092103,
+    40333975). На старте других владельцев быть не может — второй экземпляр не даёт запустить
+    core/process_lock.py. Статус и next_action_at не меняются. Возвращает id разблокированных."""
+    with _connect() as conn:
+        ids = [row["deal_id"] for row in conn.execute("SELECT deal_id FROM deals WHERE in_progress = 1")]
+        if ids:
+            conn.execute("UPDATE deals SET in_progress = 0 WHERE in_progress = 1")
+    return ids
 
 
 def stop_reminders(deal_id: int) -> None:
@@ -482,6 +499,42 @@ def log_event(deal_id: int, direction: str, channel: str | None, text: str) -> N
             "INSERT INTO events_log (deal_id, ts, direction, channel, text) VALUES (?, ?, ?, ?, ?)",
             (deal_id, now_iso(), direction, channel, text),
         )
+
+
+def list_new_deals() -> list[Deal]:
+    with _connect() as conn:
+        rows = conn.execute("SELECT * FROM deals WHERE status = ?", (Status.NEW.value,)).fetchall()
+        return [Deal.from_row(r) for r in rows]
+
+
+def get_first_outgoing_channel(deal_id: int) -> str | None:
+    """Канал первого исходящего сообщения сделки, None — исходящих не было."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT channel FROM events_log WHERE deal_id = ? AND direction = 'out' ORDER BY id LIMIT 1",
+            (deal_id,),
+        ).fetchone()
+    return row["channel"] if row else None
+
+
+def has_outgoing_text(deal_id: int, text: str) -> bool:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM events_log WHERE deal_id = ? AND direction = 'out' AND text = ? LIMIT 1",
+            (deal_id, text),
+        ).fetchone()
+    return row is not None
+
+
+def get_last_outgoing_text(deal_id: int) -> str | None:
+    """Последнее сообщение бота клиенту — контекст для классификации ответа: голое "нет" на
+    "Хотите что-то дополнить?" — согласие, а на "Заявка актуальна?" — отказ (сделка 40333785)."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT text FROM events_log WHERE deal_id = ? AND direction = 'out' ORDER BY id DESC LIMIT 1",
+            (deal_id,),
+        ).fetchone()
+    return row["text"] if row else None
 
 
 def list_recent_activity(since_iso: str) -> list[dict]:

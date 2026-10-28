@@ -12,6 +12,8 @@ from core import checklist, templates, timeutils
 from db import repository as repo
 from db.models import Channel, Deal, INACTIVE_STATUSES, ReplyCategory, Status
 from email_channel import sender as email_sender
+from reporting import watchdog
+from reporting import webhook as report_webhook
 from telegram_channel import sender as telegram_sender
 
 logger = logging.getLogger(__name__)
@@ -45,7 +47,7 @@ _FAQ_CYCLE_CAP = 5
 
 async def _send_via_channel(deal: Deal, text: str) -> None:
     if deal.channel == Channel.TELEGRAM:
-        await telegram_sender.send_reply(deal.telegram_peer_id, text)
+        await telegram_sender.send_reply(deal.telegram_peer_id, text, deal.telegram_username)
     elif deal.channel == Channel.EMAIL:
         subject = f"Re: {settings.email_subject}"
         await asyncio.to_thread(email_sender.send_email_sync, deal.email_address, subject, text)
@@ -129,8 +131,8 @@ async def process_new_deal(deal_id: int) -> None:
         return
 
     try:
-        missing = checklist.assess(deal.stack_text, deal.case_text)
-        topic_questions = checklist.assess_topic(deal.stack_text, deal.case_text)
+        missing = await asyncio.to_thread(checklist.assess, deal.stack_text, deal.case_text)
+        topic_questions = await asyncio.to_thread(checklist.assess_topic, deal.stack_text, deal.case_text)
         messaging_flagged = await asyncio.to_thread(
             checklist.mentions_messaging_work, deal.case_text
         )
@@ -159,12 +161,21 @@ async def process_new_deal(deal_id: int) -> None:
     if sent is None:
         return
 
+    channel, peer_id = sent
+    await _finish_first_contact(deal_id, channel, peer_id, messaging_flagged)
+
+
+async def _finish_first_contact(
+    deal_id: int, channel: Channel, peer_id: int | None, messaging_flagged: bool
+) -> None:
+    """Всё, что идёт после отправки первого сообщения: этап, статус ожидания, тег канала,
+    предупреждение о тарифе. Общая часть для process_new_deal и recover_new_deals — предупреждение
+    не уходит повторно, если уже есть в журнале."""
     try:
         await asyncio.to_thread(amo_actions.move_to_negotiations, deal_id)
     except Exception:
         logger.exception("Сделка %s: не удалось перевести на этап 'Первичные переговоры'", deal_id)
 
-    channel, peer_id = sent
     next_action_at = timeutils.next_reminder_at_iso()
     repo.set_awaiting_first_sent(deal_id, channel.value, peer_id, next_action_at)
 
@@ -183,6 +194,8 @@ async def process_new_deal(deal_id: int) -> None:
         except Exception:
             logger.exception("Сделка %s: не удалось поставить тег 'Месседжинг'", deal_id)
         try:
+            if repo.has_outgoing_text(deal_id, templates.MESSAGING_TARIFF_WARNING):
+                return
             fresh_deal = repo.get_deal(deal_id)  # канал/peer_id теперь сохранены
             await _send_via_channel(fresh_deal, templates.MESSAGING_TARIFF_WARNING)
             repo.log_event(
@@ -192,6 +205,53 @@ async def process_new_deal(deal_id: int) -> None:
             logger.exception(
                 "Сделка %s: не удалось отправить предупреждение о тарифе на сообщения", deal_id
             )
+
+
+async def recover_new_deals(stuck: list[Deal] | None = None) -> None:
+    """При старте main.py: сделки, оставшиеся в NEW, — процесс оборвался посреди первого контакта
+    (до 3 мин антибан-паузы перед отправкой), а опрос amoCRM записанные сделки пропускает, так что
+    без этого они висели бы вечно (39659939 — с 24.07).
+    - Исходящих нет — клиенту ничего не ушло: обычный process_new_deal.
+    - Исходящее есть — сообщение ушло, но статус не сохранён: повторно не шлём, доделываем шаги
+      после отправки (_finish_first_contact). Для Telegram peer_id находим заново по username;
+      не нашёлся — FAILED и задача Варваре.
+
+    `stuck` — снимок NEW-сделок, сделанный ДО запуска опроса amoCRM (см. main.py): опрос сам
+    создаёт свежие NEW-сделки и обрабатывает их, их здесь трогать нельзя — иначе двойное первое
+    сообщение."""
+    for deal in (repo.list_new_deals() if stuck is None else stuck):
+        deal_id = deal.deal_id
+        try:
+            sent_channel = repo.get_first_outgoing_channel(deal_id)
+            if sent_channel is None:
+                logger.warning("Сделка %s: осталась в NEW без отправки — обрабатываю заново", deal_id)
+                await process_new_deal(deal_id)
+                continue
+
+            logger.warning("Сделка %s: первое сообщение ушло, но статус не сохранён — доделываю шаги", deal_id)
+            channel = Channel(sent_channel)
+            peer_id = None
+            if channel == Channel.TELEGRAM:
+                try:
+                    peer_id = await telegram_sender.resolve_peer_id(deal.telegram_username)
+                except Exception:
+                    logger.exception("Сделка %s: не удалось найти Telegram-id клиента", deal_id)
+                    repo.mark_failed(deal_id, templates.TASK_TEXT_FIRST_CONTACT_UNCONFIRMED)
+                    try:
+                        await asyncio.to_thread(
+                            amo_actions.create_manager_task, deal_id, templates.TASK_TEXT_FIRST_CONTACT_UNCONFIRMED
+                        )
+                    except Exception:
+                        logger.exception("Сделка %s: не удалось создать задачу на Варвару", deal_id)
+                    continue
+            try:
+                messaging_flagged = await asyncio.to_thread(checklist.mentions_messaging_work, deal.case_text)
+            except Exception:
+                logger.exception("Сделка %s: не удалось проверить работу с сообщениями", deal_id)
+                messaging_flagged = False
+            await _finish_first_contact(deal_id, channel, peer_id, messaging_flagged)
+        except Exception:
+            logger.exception("Сделка %s: не удалось восстановить сделку из NEW", deal_id)
 
 
 def _deal_in_reminder_eligible_stage(deal_id: int) -> bool:
@@ -316,6 +376,7 @@ async def process_scheduler_tick() -> None:
     неотличимы для шедулера, статус в локальной БД один и тот же."""
     now = timeutils.to_iso(timeutils.utcnow())
     for stale in repo.list_due_rows(now):
+        watchdog.beat("scheduler")
         deal_id = stale.deal_id
         if not repo.try_lock(deal_id):
             continue
@@ -496,6 +557,25 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
             )
             return
 
+    try:
+        await _handle_locked_reply(deal_id, deal, text, channel)
+    except Exception:
+        # Страховка (пункт 5 аудита 2026-10-28): любая непредвиденная ошибка после взятия блокировки
+        # раньше бросала сделку заблокированной, а ответ клиента — необработанным, без алерта.
+        logger.exception("Сделка %s: не удалось обработать ответ клиента", deal_id)
+        repo.unlock(deal_id)
+        try:
+            await asyncio.to_thread(
+                report_webhook.send_error_notification,
+                marker=str(deal_id),
+                message=f"Не удалось обработать ответ клиента — разберите вручную: {text[:200]}",
+            )
+        except Exception:
+            logger.exception("Сделка %s: не удалось отправить алерт о необработанном ответе", deal_id)
+
+
+async def _handle_locked_reply(deal_id: int, deal: Deal, text: str, channel: Channel) -> None:
+    """Обработка ответа клиента после взятия блокировки (см. handle_incoming_reply)."""
     if not await _log_event_with_retries(deal_id, "in", channel.value, text):
         logger.warning(
             "Сделка %s: не удалось зафиксировать входящее сообщение — сделка разблокирована для "
@@ -557,18 +637,32 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
             return
 
     try:
-        category = await asyncio.to_thread(classify_client.classify_sync, text, deal.case_text)
+        last_bot_message = repo.get_last_outgoing_text(deal_id)
+        category = await asyncio.to_thread(
+            classify_client.classify_sync, text, deal.case_text, last_bot_message
+        )
     except Exception:
         logger.exception("Сделка %s: классификация ответа не удалась, считаем ambiguous", deal_id)
         category = ReplyCategory.AMBIGUOUS
 
     if category == ReplyCategory.POSITIVE:
-        if checklist.describes_addition_to_case(text):
+        # Вызовы Claude — в фоновом потоке (иначе до ~3 мин стоит весь бот) и с безопасным
+        # результатом при сбое (решено 2026-10-28): клиент уже согласился, держать его нельзя.
+        try:
+            is_addition = await asyncio.to_thread(checklist.describes_addition_to_case, text)
+        except Exception:
+            logger.exception("Сделка %s: Claude не ответил, есть ли дополнение — дописываю ответ", deal_id)
+            is_addition = True  # лишнее «да» в ТЗ лучше, чем потерянные детали задачи
+        if is_addition:
             case_with_addition = f"{deal.case_text or ''}\n\nДополнение: {text}".strip()
         else:
             case_with_addition = deal.case_text or ""
 
-        missing = checklist.assess(deal.stack_text, case_with_addition)
+        try:
+            missing = await asyncio.to_thread(checklist.assess, deal.stack_text, case_with_addition)
+        except Exception:
+            logger.exception("Сделка %s: Claude не ответил, полное ли ТЗ — передаю как есть", deal_id)
+            missing = []
         if missing and not deal.clarification_asked:
             # Клиент согласился, но ТЗ всё ещё неполное (тот же checklist, что в первом
             # сообщении) — переспрашиваем один раз перед передачей партнёрам, вместо немедленной
@@ -611,6 +705,10 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
         )
         task_text = templates.TASK_TEXT_NEGATIVE_CLIENT
         new_status = Status.ESCALATED_NEGATIVE
+    elif category == ReplyCategory.NOT_RELEVANT:
+        reply_text = templates.REPLY_NOT_RELEVANT
+        task_text = templates.TASK_TEXT_NOT_RELEVANT
+        new_status = Status.CLOSED_NOT_RELEVANT
     else:
         faq_id = None
         try:
@@ -730,10 +828,18 @@ async def handle_incoming_reply(deal_id: int, text: str, channel: Channel) -> No
         except Exception:
             logger.exception("Сделка %s: не удалось отправить ответ клиенту (%s)", deal_id, category)
 
-    try:
-        await asyncio.to_thread(amo_actions.move_to_manual_review, deal_id)
-    except Exception:
-        logger.exception("Сделка %s: не удалось перевести на этап 'Ручная проверка'", deal_id)
+    if category == ReplyCategory.NOT_RELEVANT:
+        # Заявка неактуальна — закрываем, как при закрытии без ответа (этап «Блок»), а не
+        # «Ручная проверка»: подключаться к диалогу человеку не нужно (решено 2026-10-28).
+        try:
+            await asyncio.to_thread(amo_actions.move_to_blocked, deal_id)
+        except Exception:
+            logger.exception("Сделка %s: не удалось перевести на этап 'Блок'", deal_id)
+    else:
+        try:
+            await asyncio.to_thread(amo_actions.move_to_manual_review, deal_id)
+        except Exception:
+            logger.exception("Сделка %s: не удалось перевести на этап 'Ручная проверка'", deal_id)
 
     try:
         await asyncio.to_thread(amo_actions.create_manager_task, deal_id, task_text)

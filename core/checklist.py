@@ -9,7 +9,10 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+# По умолчанию SDK ждёт ответа до 10 минут на попытку (с 2 повторами — до 30 минут), всё это
+# время сделка заблокирована. Классификация отвечает за секунды.
+_CLAUDE_TIMEOUT_SECONDS = 60.0
+_client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=_CLAUDE_TIMEOUT_SECONDS)
 
 MIN_SERVICES = 2
 
@@ -91,7 +94,10 @@ def _assess_with_llm(stack_text: str | None, case_text: str | None) -> tuple[boo
     Безопасный дефолт при пропущенном поле или отсутствии tool_use — False (пункт помечается)."""
     response = _client.messages.create(
         model=settings.anthropic_model,
-        max_tokens=150,
+        # С запасом: services_found идёт ПЕРВЫМ и на длинном стеке (сделка 40328525, 12 сервисов)
+        # съедал 150 токенов — describes_problem_or_data обрезался и подробное ТЗ помечалось как
+        # неполное. Оплачиваются только реально сгенерированные токены, не лимит.
+        max_tokens=1024,
         system=[{"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
         tools=[_TOOL],
         tool_choice={"type": "tool", "name": "assess_case"},

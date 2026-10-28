@@ -11,17 +11,20 @@ from db.models import ReplyCategory
 
 logger = logging.getLogger(__name__)
 
-_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+# По умолчанию SDK ждёт ответа до 10 минут на попытку (с 2 повторами — до 30 минут), всё это
+# время сделка заблокирована. Классификация отвечает за секунды.
+_CLAUDE_TIMEOUT_SECONDS = 60.0
+_client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=_CLAUDE_TIMEOUT_SECONDS)
 
 _TOOL = {
     "name": "classify_reply",
-    "description": "Классифицировать ответ клиента по трём категориям.",
+    "description": "Классифицировать ответ клиента по четырём категориям.",
     "input_schema": {
         "type": "object",
         "properties": {
             "category": {
                 "type": "string",
-                "enum": ["positive", "negative", "ambiguous"],
+                "enum": ["positive", "negative", "ambiguous", "not_relevant"],
             }
         },
         "required": ["category"],
@@ -29,7 +32,9 @@ _TOOL = {
 }
 
 
-def classify_sync(message_text: str, case_context: str | None) -> ReplyCategory:
+def classify_sync(
+    message_text: str, case_context: str | None, last_bot_message: str | None = None
+) -> ReplyCategory:
     if not settings.anthropic_api_key:
         logger.warning(
             "ANTHROPIC_API_KEY не задан — используется временная классификация по правилам "
@@ -50,6 +55,7 @@ def classify_sync(message_text: str, case_context: str | None) -> ReplyCategory:
                 "role": "user",
                 "content": (
                     f"Контекст задачи клиента: {case_context or '—'}\n\n"
+                    f"Последнее сообщение бота клиенту:\n{last_bot_message or '—'}\n\n"
                     f"Ответ клиента:\n{message_text}"
                 ),
             }

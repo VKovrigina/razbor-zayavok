@@ -244,3 +244,49 @@ def test_list_recent_activity_covers_multiple_deals(repo):
     rows = repo.list_recent_activity(since)
 
     assert {r["deal_id"] for r in rows} == {47, 48}
+
+
+def test_get_last_outgoing_text_returns_latest_out(repo):
+    repo.create_deal_new(301, 100, "Иван", "ivan_test", None, "Bitrix24", "Кейс")
+    repo.log_event(301, "out", "telegram", "Первое сообщение. Хотите что-то дополнить к задаче?")
+    repo.log_event(301, "in", "telegram", "а сколько стоит?")
+    repo.log_event(301, "out", "telegram", "Здравствуйте, ваша заявка актуальна?")
+    repo.log_event(301, "in", "telegram", "нет")
+    assert repo.get_last_outgoing_text(301) == "Здравствуйте, ваша заявка актуальна?"
+
+
+def test_get_last_outgoing_text_none_without_outgoing(repo):
+    repo.create_deal_new(302, 100, "Иван", "ivan_test", None, "Bitrix24", "Кейс")
+    repo.log_event(302, "in", "telegram", "привет")
+    repo.log_event(303, "out", "telegram", "сообщение другой сделке")
+    assert repo.get_last_outgoing_text(302) is None
+
+
+def test_closed_not_relevant_not_due_for_reminders(repo):
+    from db.models import Status as S
+
+    repo.create_deal_new(304, 100, "Иван", "ivan_test", None, "Bitrix24", "Кейс")
+    repo.set_awaiting_first_sent(304, "telegram", 1, "2000-01-01T00:00:00+00:00")
+    repo.escalate(304, S.CLOSED_NOT_RELEVANT)
+    assert all(d.deal_id != 304 for d in repo.list_due_rows("2100-01-01T00:00:00+00:00"))
+
+
+def test_release_all_locks_unlocks_and_keeps_state(repo):
+    repo.create_deal_new(401, 100, "Иван", "ivan_a", None, "Bitrix24", "Кейс")
+    repo.create_deal_new(402, 100, "Иван", "ivan_b", None, "Bitrix24", "Кейс")
+    repo.set_awaiting_first_sent(401, "telegram", 1, "2026-10-28T11:00:00+00:00")
+    assert repo.try_lock(401)
+    before = repo.get_deal(401)
+
+    released = repo.release_all_locks()
+
+    after = repo.get_deal(401)
+    assert released == [401]
+    assert after.in_progress is False
+    assert (after.status, after.next_action_at) == (before.status, before.next_action_at)
+    assert repo.try_lock(401)  # снова можно взять
+
+
+def test_release_all_locks_nothing_locked(repo):
+    repo.create_deal_new(403, 100, "Иван", "ivan_c", None, "Bitrix24", "Кейс")
+    assert repo.release_all_locks() == []

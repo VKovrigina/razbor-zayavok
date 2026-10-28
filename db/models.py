@@ -9,6 +9,9 @@ class Status(str, Enum):
     AWAITING_REPLY_1 = "AWAITING_REPLY_1"
     AWAITING_REPLY_2 = "AWAITING_REPLY_2"
     CLOSED_NO_REPLY = "CLOSED_NO_REPLY"
+    # Клиент ответил, что заявка неактуальна — закрыта (этап «Блок»), но, как и CLOSED_NO_REPLY,
+    # переоткрывается новым сообщением клиента (например, "задача снова актуальна").
+    CLOSED_NOT_RELEVANT = "CLOSED_NOT_RELEVANT"
     ESCALATED_POSITIVE = "ESCALATED_POSITIVE"
     ESCALATED_NEGATIVE = "ESCALATED_NEGATIVE"
     ESCALATED_AMBIGUOUS = "ESCALATED_AMBIGUOUS"
@@ -27,6 +30,7 @@ AWAITING_STATUSES = {
     Status.AWAITING_REPLY_1,
     Status.AWAITING_REPLY_2,
     Status.CLOSED_NO_REPLY,
+    Status.CLOSED_NOT_RELEVANT,
 }
 
 # сделка окончательно закрыта для бота — не переоткрывается входящим сообщением, не считается
@@ -43,6 +47,7 @@ class ReplyCategory(str, Enum):
     POSITIVE = "positive"
     NEGATIVE = "negative"
     AMBIGUOUS = "ambiguous"
+    NOT_RELEVANT = "not_relevant"
 
 
 @dataclass

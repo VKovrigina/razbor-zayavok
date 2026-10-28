@@ -31,6 +31,10 @@ class TelegramSendError(Exception):
     вызывающий код должен переключиться на email-fallback."""
 
 
+class TelegramPeerNotCachedError(TelegramSendError):
+    """Числовой peer_id не резолвится: в кэше сессии нет access_hash этого пользователя."""
+
+
 async def _jitter(low: float, high: float) -> None:
     await asyncio.sleep(random.uniform(low, high))
 
@@ -44,8 +48,12 @@ async def _send(target, text: str) -> int:
         entity = await asyncio.wait_for(
             client.get_entity(target), timeout=_TELETHON_CALL_TIMEOUT_SECONDS
         )
-    except (UsernameNotOccupiedError, UsernameInvalidError, ValueError) as e:
+    except ValueError as e:
         # До реальной попытки отправки не дошло — не тратим дневной лимит (P-017 в BACKLOG.md).
+        if isinstance(target, int):
+            raise TelegramPeerNotCachedError(f"Пользователь {target} не найден в кэше сессии: {e}") from e
+        raise TelegramSendError(f"Некорректный или несуществующий username: {e}") from e
+    except (UsernameNotOccupiedError, UsernameInvalidError) as e:
         raise TelegramSendError(f"Некорректный или несуществующий username: {e}") from e
     except asyncio.TimeoutError as e:
         raise TelegramSendError(
@@ -84,11 +92,43 @@ async def _send(target, text: str) -> int:
 
 async def send_first_contact(username: str, text: str) -> int:
     """Первое сообщение по username. Возвращает numeric peer_id для последующего сопоставления
-    входящих ответов. Бросает TelegramSendError, если отправка невозможна."""
+    входящих ответов. Бросает TelegramSendError, если отправка невозможна.
+
+    Сразу сохраняет кэш сессии: telethon пишет его на диск раз в минуту, и если процесс
+    завершится раньше (остановка через os._exit, падение), access_hash нового клиента теряется —
+    дальше писать ему по peer_id нельзя (сделки 40125553, 40179275: месяц без напоминаний)."""
     await _jitter(30, 180)
-    return await _send(username, text)
+    peer_id = await _send(username, text)
+    try:
+        get_client().session.save()
+    except Exception:
+        logger.exception("Не удалось сохранить кэш Telegram-сессии после первого сообщения")
+    return peer_id
 
 
-async def send_reply(peer_id: int, text: str) -> None:
+async def resolve_peer_id(username: str) -> int:
+    """Числовой peer_id по username без отправки — для восстановления сделки, у которой первое
+    сообщение ушло, а peer_id сохранить не успели (core/state_machine.py: recover_new_deals)."""
+    client = get_client()
+    try:
+        entity = await asyncio.wait_for(client.get_entity(username), timeout=_TELETHON_CALL_TIMEOUT_SECONDS)
+    except (UsernameNotOccupiedError, UsernameInvalidError, ValueError, asyncio.TimeoutError) as e:
+        raise TelegramSendError(f"Не удалось найти @{username}: {e!r}") from e
+    try:
+        client.session.save()
+    except Exception:
+        logger.exception("Не удалось сохранить кэш Telegram-сессии после поиска @%s", username)
+    return entity.id
+
+
+async def send_reply(peer_id: int, text: str, fallback_username: str | None = None) -> None:
+    """Ответ/напоминание по peer_id. Если клиента нет в кэше сессии (см. send_first_contact) —
+    повторяем по username: его поиск заново кладёт клиента в кэш."""
     await _jitter(15, 90)
-    await _send(peer_id, text)
+    try:
+        await _send(peer_id, text)
+    except TelegramPeerNotCachedError:
+        if not fallback_username:
+            raise
+        logger.warning("Пользователь %s не найден в кэше сессии — отправляю по username @%s", peer_id, fallback_username)
+        await _send(fallback_username, text)

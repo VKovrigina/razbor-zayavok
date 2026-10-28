@@ -33,7 +33,7 @@ def _patch_common(monkeypatch):
     )
 
     monkeypatch.setattr(
-        state_machine.classify_client, "classify_sync", lambda text, case: ReplyCategory.AMBIGUOUS
+        state_machine.classify_client, "classify_sync", lambda text, case, last_bot_message: ReplyCategory.AMBIGUOUS
     )
     monkeypatch.setattr(state_machine.checklist, "mentions_messaging_work", lambda text: False)
     monkeypatch.setattr(state_machine.checklist, "assess", lambda stack, case: [])
@@ -41,7 +41,7 @@ def _patch_common(monkeypatch):
 
     sent_messages = []
 
-    async def fake_send_reply(peer_id, text):
+    async def fake_send_reply(peer_id, text, fallback_username=None):
         sent_messages.append(text)
 
     monkeypatch.setattr(state_machine.telegram_sender, "send_reply", fake_send_reply)
@@ -184,7 +184,7 @@ def test_faq_match_but_send_fails_falls_back_to_normal_escalation(repo, monkeypa
     _patch_faq_match(monkeypatch, "faq_price", "Точная цена после оценки.")
     _make_deal_awaiting_reply(repo, 3)
 
-    async def failing_send_reply(peer_id, text):
+    async def failing_send_reply(peer_id, text, fallback_username=None):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(state_machine.telegram_sender, "send_reply", failing_send_reply)
@@ -222,7 +222,7 @@ def test_positive_reply_with_addition_includes_it_in_note_and_field(repo, monkey
     строкой "Дополнение: ..." в обоих местах."""
     _patch_common(monkeypatch)
     monkeypatch.setattr(
-        state_machine.classify_client, "classify_sync", lambda text, case: ReplyCategory.POSITIVE
+        state_machine.classify_client, "classify_sync", lambda text, case, last_bot_message: ReplyCategory.POSITIVE
     )
     monkeypatch.setattr(state_machine.checklist, "describes_addition_to_case", lambda text: True)
 
@@ -251,7 +251,7 @@ def test_positive_reply_with_addition_includes_it_in_note_and_field(repo, monkey
 def test_positive_reply_bare_agreement_excludes_addition_line(repo, monkeypatch):
     _patch_common(monkeypatch)
     monkeypatch.setattr(
-        state_machine.classify_client, "classify_sync", lambda text, case: ReplyCategory.POSITIVE
+        state_machine.classify_client, "classify_sync", lambda text, case, last_bot_message: ReplyCategory.POSITIVE
     )
     monkeypatch.setattr(state_machine.checklist, "describes_addition_to_case", lambda text: False)
 
@@ -277,7 +277,7 @@ def test_positive_reply_bare_agreement_excludes_addition_line(repo, monkeypatch)
 def test_positive_reply_full_spec_field_failure_does_not_block_escalation(repo, monkeypatch):
     manager_tasks, sent_messages = _patch_common(monkeypatch)
     monkeypatch.setattr(
-        state_machine.classify_client, "classify_sync", lambda text, case: ReplyCategory.POSITIVE
+        state_machine.classify_client, "classify_sync", lambda text, case, last_bot_message: ReplyCategory.POSITIVE
     )
     monkeypatch.setattr(state_machine.checklist, "describes_addition_to_case", lambda text: False)
 
@@ -298,7 +298,7 @@ def test_positive_reply_full_spec_field_failure_does_not_block_escalation(repo, 
 def test_positive_reply_with_missing_data_asks_clarification_instead_of_escalating(repo, monkeypatch):
     manager_tasks, sent_messages = _patch_common(monkeypatch)
     monkeypatch.setattr(
-        state_machine.classify_client, "classify_sync", lambda text, case: ReplyCategory.POSITIVE
+        state_machine.classify_client, "classify_sync", lambda text, case, last_bot_message: ReplyCategory.POSITIVE
     )
     monkeypatch.setattr(state_machine.checklist, "describes_addition_to_case", lambda text: False)
     monkeypatch.setattr(state_machine.checklist, "assess", lambda stack, case: ["stack"])
@@ -322,7 +322,7 @@ def test_positive_reply_missing_data_second_time_escalates_anyway(repo, monkeypa
     равно эскалируем, чтобы не зависнуть навсегда (решение пользователя: лимит 1 переспрос)."""
     manager_tasks, sent_messages = _patch_common(monkeypatch)
     monkeypatch.setattr(
-        state_machine.classify_client, "classify_sync", lambda text, case: ReplyCategory.POSITIVE
+        state_machine.classify_client, "classify_sync", lambda text, case, last_bot_message: ReplyCategory.POSITIVE
     )
     monkeypatch.setattr(state_machine.checklist, "describes_addition_to_case", lambda text: False)
     monkeypatch.setattr(state_machine.checklist, "assess", lambda stack, case: ["stack"])
@@ -445,7 +445,7 @@ def test_incoming_log_event_failure_unlocks_and_aborts(repo, monkeypatch):
 
     classify_called = False
 
-    def should_not_be_called(text, case):
+    def should_not_be_called(text, case, last_bot_message):
         nonlocal classify_called
         classify_called = True
         return ReplyCategory.AMBIGUOUS
@@ -583,7 +583,7 @@ def test_process_new_deal_messaging_work_detected_sends_second_message_and_flags
 
     sent_replies = []
 
-    async def fake_send_reply(peer_id, text):
+    async def fake_send_reply(peer_id, text, fallback_username=None):
         sent_replies.append(text)
 
     monkeypatch.setattr(state_machine.telegram_sender, "send_reply", fake_send_reply)
@@ -618,7 +618,7 @@ def test_process_new_deal_no_messaging_work_sends_only_first_message(repo, monke
     )
     send_reply_called = False
 
-    async def should_not_be_called(peer_id, text):
+    async def should_not_be_called(peer_id, text, fallback_username=None):
         nonlocal send_reply_called
         send_reply_called = True
 
@@ -646,7 +646,7 @@ def test_process_new_deal_messaging_warning_send_failure_does_not_block_first_me
 
     monkeypatch.setattr(state_machine.telegram_sender, "send_first_contact", fake_send_first_contact)
 
-    async def failing_send_reply(peer_id, text):
+    async def failing_send_reply(peer_id, text, fallback_username=None):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(state_machine.telegram_sender, "send_reply", failing_send_reply)
@@ -667,7 +667,7 @@ def test_late_messaging_mention_sends_warning_and_waits_without_classifying(repo
 
     classify_called = False
 
-    def should_not_be_called(text, case):
+    def should_not_be_called(text, case, last_bot_message):
         nonlocal classify_called
         classify_called = True
         return ReplyCategory.AMBIGUOUS
@@ -700,10 +700,42 @@ def _make_deal_awaiting_reply_flagged(repo, deal_id: int):
     repo.set_messaging_tariff_flagged(deal_id, True)
 
 
+def test_reply_passes_deal_username_for_fallback(repo, monkeypatch):
+    _patch_common(monkeypatch)
+    seen = []
+
+    async def fake_send_reply(peer_id, text, fallback_username=None):
+        seen.append((peer_id, fallback_username))
+
+    monkeypatch.setattr(state_machine.telegram_sender, "send_reply", fake_send_reply)
+    _make_deal_awaiting_reply(repo, 51)
+
+    asyncio.run(state_machine._send_via_channel(repo.get_deal(51), "текст"))
+
+    assert seen == [(12345, "client_test")]
+
+
+def test_classifier_receives_last_bot_message(repo, monkeypatch):
+    _patch_common(monkeypatch)
+    _patch_faq_match(monkeypatch, None)
+    seen = []
+    monkeypatch.setattr(
+        state_machine.classify_client,
+        "classify_sync",
+        lambda text, case, last_bot_message: seen.append(last_bot_message) or ReplyCategory.AMBIGUOUS,
+    )
+    _make_deal_awaiting_reply(repo, 31)
+    repo.log_event(31, "out", "telegram", "Описание задачи... Хотите что-то дополнить к задаче?")
+
+    _handle(31, "нет")
+
+    assert seen == ["Описание задачи... Хотите что-то дополнить к задаче?"]
+
+
 def test_messaging_flagged_positive_reply_creates_extra_manager_task(repo, monkeypatch):
     manager_tasks, sent_messages = _patch_common(monkeypatch)
     monkeypatch.setattr(
-        state_machine.classify_client, "classify_sync", lambda text, case: ReplyCategory.POSITIVE
+        state_machine.classify_client, "classify_sync", lambda text, case, last_bot_message: ReplyCategory.POSITIVE
     )
     monkeypatch.setattr(state_machine.checklist, "describes_addition_to_case", lambda text: False)
     _make_deal_awaiting_reply_flagged(repo, 23)
@@ -721,7 +753,7 @@ def test_messaging_flagged_positive_reply_creates_extra_manager_task(repo, monke
 def test_messaging_flagged_negative_reply_creates_extra_manager_task(repo, monkeypatch):
     manager_tasks, sent_messages = _patch_common(monkeypatch)
     monkeypatch.setattr(
-        state_machine.classify_client, "classify_sync", lambda text, case: ReplyCategory.NEGATIVE
+        state_machine.classify_client, "classify_sync", lambda text, case, last_bot_message: ReplyCategory.NEGATIVE
     )
     _make_deal_awaiting_reply_flagged(repo, 24)
 
@@ -739,7 +771,7 @@ def test_messaging_flagged_negative_reply_creates_extra_manager_task(repo, monke
 def test_negative_reply_without_messaging_flag_uses_standard_reply(repo, monkeypatch):
     manager_tasks, sent_messages = _patch_common(monkeypatch)
     monkeypatch.setattr(
-        state_machine.classify_client, "classify_sync", lambda text, case: ReplyCategory.NEGATIVE
+        state_machine.classify_client, "classify_sync", lambda text, case, last_bot_message: ReplyCategory.NEGATIVE
     )
     _make_deal_awaiting_reply(repo, 26)  # не помечена флагом
 
@@ -751,7 +783,7 @@ def test_negative_reply_without_messaging_flag_uses_standard_reply(repo, monkeyp
 def test_messaging_not_flagged_no_extra_manager_task(repo, monkeypatch):
     manager_tasks, sent_messages = _patch_common(monkeypatch)
     monkeypatch.setattr(
-        state_machine.classify_client, "classify_sync", lambda text, case: ReplyCategory.POSITIVE
+        state_machine.classify_client, "classify_sync", lambda text, case, last_bot_message: ReplyCategory.POSITIVE
     )
     monkeypatch.setattr(state_machine.checklist, "describes_addition_to_case", lambda text: False)
     _make_deal_awaiting_reply(repo, 25)  # не помечена флагом
@@ -761,3 +793,269 @@ def test_messaging_not_flagged_no_extra_manager_task(repo, monkeypatch):
     task_texts = [t for _, t in manager_tasks]
     assert state_machine.templates.TASK_TEXT_MESSAGING_POSITIVE not in task_texts
     assert state_machine.templates.TASK_TEXT_MESSAGING_NEGATIVE not in task_texts
+
+
+def _patch_stage_moves(monkeypatch):
+    moves = []
+    monkeypatch.setattr(
+        state_machine.amo_actions, "move_to_manual_review", lambda deal_id: moves.append("manual_review")
+    )
+    monkeypatch.setattr(state_machine.amo_actions, "move_to_blocked", lambda deal_id: moves.append("blocked"))
+    return moves
+
+
+def test_not_relevant_reply_closes_deal_with_closing_text(repo, monkeypatch):
+    manager_tasks, sent_messages = _patch_common(monkeypatch)
+    moves = _patch_stage_moves(monkeypatch)
+    monkeypatch.setattr(
+        state_machine.classify_client, "classify_sync",
+        lambda text, case, last_bot_message: ReplyCategory.NOT_RELEVANT,
+    )
+    _make_deal_awaiting_reply(repo, 41)
+
+    _handle(41, "Здравствуйте\nНет, спасибо")
+
+    deal = repo.get_deal(41)
+    assert deal.status == Status.CLOSED_NOT_RELEVANT
+    assert deal.next_action_at is None
+    assert sent_messages == [state_machine.templates.REPLY_NOT_RELEVANT]
+    assert moves == ["blocked"]
+    assert [t for _, t in manager_tasks] == [state_machine.templates.TASK_TEXT_NOT_RELEVANT]
+
+
+def test_not_relevant_with_messaging_flag_no_extra_task(repo, monkeypatch):
+    manager_tasks, sent_messages = _patch_common(monkeypatch)
+    _patch_stage_moves(monkeypatch)
+    monkeypatch.setattr(
+        state_machine.classify_client, "classify_sync",
+        lambda text, case, last_bot_message: ReplyCategory.NOT_RELEVANT,
+    )
+    _make_deal_awaiting_reply_flagged(repo, 42)
+
+    _handle(42, "уже неактуально")
+
+    assert sent_messages == [state_machine.templates.REPLY_NOT_RELEVANT]
+    assert [t for _, t in manager_tasks] == [state_machine.templates.TASK_TEXT_NOT_RELEVANT]
+
+
+def test_message_after_not_relevant_reopens_deal(repo, monkeypatch):
+    _patch_common(monkeypatch)
+    _patch_stage_moves(monkeypatch)
+    _patch_faq_match(monkeypatch, None)
+    categories = iter([ReplyCategory.NOT_RELEVANT, ReplyCategory.POSITIVE])
+    seen = []
+
+    def classify(text, case, last_bot_message):
+        seen.append(text)
+        return next(categories)
+
+    monkeypatch.setattr(state_machine.classify_client, "classify_sync", classify)
+    monkeypatch.setattr(state_machine.checklist, "describes_addition_to_case", lambda text: False)
+    _make_deal_awaiting_reply(repo, 43)
+
+    _handle(43, "нет, неактуально")
+    _handle(43, "Добрый день, задача снова актуальна, передавайте")
+
+    assert seen == ["нет, неактуально", "Добрый день, задача снова актуальна, передавайте"]
+    assert repo.get_deal(43).status == Status.ESCALATED_POSITIVE
+
+
+def test_negative_reply_still_goes_to_manual_review(repo, monkeypatch):
+    manager_tasks, sent_messages = _patch_common(monkeypatch)
+    moves = _patch_stage_moves(monkeypatch)
+    monkeypatch.setattr(
+        state_machine.classify_client, "classify_sync",
+        lambda text, case, last_bot_message: ReplyCategory.NEGATIVE,
+    )
+    _make_deal_awaiting_reply(repo, 44)
+
+    _handle(44, "позовите живого человека")
+
+    assert repo.get_deal(44).status == Status.ESCALATED_NEGATIVE
+    assert sent_messages == [state_machine.templates.REPLY_NEGATIVE]
+    assert moves == ["manual_review"]
+
+
+# --- Восстановление сделок, застрявших в NEW после перезапуска (пункт 2 аудита 2026-10-28) ---
+
+
+def _patch_recovery(monkeypatch, resolved_peer=777, messaging=False):
+    calls = {"process": [], "resolve": [], "tags": [], "stages": [], "replies": [], "tasks": []}
+
+    async def fake_process(deal_id):
+        calls["process"].append(deal_id)
+
+    async def fake_resolve(username):
+        calls["resolve"].append(username)
+        if resolved_peer is None:
+            raise state_machine.telegram_sender.TelegramSendError("не найден")
+        return resolved_peer
+
+    async def fake_send_reply(peer_id, text, fallback_username=None):
+        calls["replies"].append(text)
+
+    monkeypatch.setattr(state_machine, "process_new_deal", fake_process)
+    monkeypatch.setattr(state_machine.telegram_sender, "resolve_peer_id", fake_resolve)
+    monkeypatch.setattr(state_machine.telegram_sender, "send_reply", fake_send_reply)
+    monkeypatch.setattr(state_machine.amo_actions, "move_to_negotiations", lambda d: calls["stages"].append(d))
+    monkeypatch.setattr(state_machine.amo_actions, "set_channel_tag", lambda d, ch: calls["tags"].append((d, ch)))
+    monkeypatch.setattr(state_machine.amo_actions, "set_messaging_tariff_tag", lambda d: None)
+    monkeypatch.setattr(state_machine.amo_actions, "create_manager_task", lambda d, t: calls["tasks"].append((d, t)))
+    monkeypatch.setattr(state_machine.checklist, "mentions_messaging_work", lambda case_text: messaging)
+    return calls
+
+
+def _recover():
+    asyncio.run(state_machine.recover_new_deals())
+
+
+def test_recover_new_deal_without_outgoing_reprocesses(repo, monkeypatch):
+    calls = _patch_recovery(monkeypatch)
+    _make_new_deal(repo, 61)
+    _recover()
+    assert calls["process"] == [61]
+
+
+def test_recover_new_deal_with_telegram_outgoing_finishes_steps(repo, monkeypatch):
+    calls = _patch_recovery(monkeypatch)
+    _make_new_deal(repo, 62)
+    repo.log_event(62, "out", "telegram", "Первое сообщение")
+    _recover()
+    deal = repo.get_deal(62)
+    assert calls["process"] == []
+    assert calls["resolve"] == ["client_test"]
+    assert deal.status == Status.AWAITING_REPLY_1
+    assert deal.telegram_peer_id == 777 and deal.channel == Channel.TELEGRAM
+    assert deal.next_action_at is not None
+    assert calls["stages"] == [62] and calls["tags"] == [(62, "telegram")]
+    assert calls["replies"] == []  # первое сообщение повторно не уходит
+
+
+def test_recover_telegram_peer_unresolved_marks_failed_with_task(repo, monkeypatch):
+    calls = _patch_recovery(monkeypatch, resolved_peer=None)
+    _make_new_deal(repo, 63)
+    repo.log_event(63, "out", "telegram", "Первое сообщение")
+    _recover()
+    assert repo.get_deal(63).status == Status.FAILED
+    assert [d for d, _ in calls["tasks"]] == [63]
+
+
+def test_recover_email_outgoing_no_telegram_lookup(repo, monkeypatch):
+    calls = _patch_recovery(monkeypatch)
+    repo.create_deal_new(64, 964, "Клиент", None, "c@example.com", "amoCRM", "Кейс")
+    repo.log_event(64, "out", "email", "Первое письмо")
+    _recover()
+    deal = repo.get_deal(64)
+    assert calls["resolve"] == []
+    assert deal.status == Status.AWAITING_REPLY_1 and deal.channel == Channel.EMAIL
+
+
+def test_recover_sends_missing_tariff_warning_once(repo, monkeypatch):
+    calls = _patch_recovery(monkeypatch, messaging=True)
+    _make_new_deal(repo, 65)
+    repo.log_event(65, "out", "telegram", "Первое сообщение")
+    _recover()
+    assert calls["replies"] == [state_machine.templates.MESSAGING_TARIFF_WARNING]
+    assert repo.get_deal(65).messaging_tariff_flagged is True
+
+
+def test_recover_does_not_resend_logged_tariff_warning(repo, monkeypatch):
+    calls = _patch_recovery(monkeypatch, messaging=True)
+    _make_new_deal(repo, 66)
+    repo.log_event(66, "out", "telegram", "Первое сообщение")
+    repo.log_event(66, "out", "telegram", state_machine.templates.MESSAGING_TARIFF_WARNING)
+    _recover()
+    assert calls["replies"] == []
+
+
+def test_recover_ignores_non_new_deals(repo, monkeypatch):
+    calls = _patch_recovery(monkeypatch)
+    _make_deal_awaiting_reply(repo, 67)
+    _recover()
+    assert calls["process"] == [] and calls["resolve"] == []
+
+
+def test_recover_error_on_one_deal_does_not_stop_others(repo, monkeypatch):
+    calls = _patch_recovery(monkeypatch)
+
+    async def flaky_process(deal_id):
+        calls["process"].append(deal_id)
+        if deal_id == 68:
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(state_machine, "process_new_deal", flaky_process)
+    _make_new_deal(repo, 68)
+    _make_new_deal(repo, 69)
+    _recover()
+    assert calls["process"] == [68, 69]
+
+
+def test_recover_only_touches_snapshot_not_fresh_new_deals(repo, monkeypatch):
+    calls = _patch_recovery(monkeypatch)
+    _make_new_deal(repo, 70)
+    snapshot = repo.list_new_deals()
+    _make_new_deal(repo, 71)  # свежая сделка, которую уже обрабатывает опрос amoCRM
+    asyncio.run(state_machine.recover_new_deals(snapshot))
+    assert calls["process"] == [70]
+
+
+# --- Пункт 5 аудита 2026-10-28: сбой Claude после «да» не теряет ответ клиента ---
+
+
+def _patch_positive(monkeypatch):
+    manager_tasks, sent_messages = _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        state_machine.classify_client, "classify_sync",
+        lambda text, case, last_bot_message: ReplyCategory.POSITIVE,
+    )
+    full_spec = []
+    monkeypatch.setattr(state_machine.amo_actions, "set_full_spec_field", lambda d, t: full_spec.append(t))
+    return manager_tasks, sent_messages, full_spec
+
+
+def _claude_down(*args, **kwargs):
+    raise RuntimeError("529 overloaded")
+
+
+def test_addition_check_failure_appends_client_text(repo, monkeypatch):
+    _, sent, full_spec = _patch_positive(monkeypatch)
+    monkeypatch.setattr(state_machine.checklist, "describes_addition_to_case", _claude_down)
+    _make_deal_awaiting_reply(repo, 81)
+
+    _handle(81, "да, и ещё нужны поля телефона")
+
+    assert repo.get_deal(81).status == Status.ESCALATED_POSITIVE
+    assert "Дополнение: да, и ещё нужны поля телефона" in full_spec[0]
+
+
+def test_completeness_check_failure_escalates_without_clarification(repo, monkeypatch):
+    _, sent, _ = _patch_positive(monkeypatch)
+    monkeypatch.setattr(state_machine.checklist, "describes_addition_to_case", lambda text: False)
+    monkeypatch.setattr(state_machine.checklist, "assess", _claude_down)
+    _make_deal_awaiting_reply(repo, 82)
+
+    _handle(82, "да")
+
+    assert repo.get_deal(82).status == Status.ESCALATED_POSITIVE
+    assert sent == [state_machine.templates.REPLY_POSITIVE]
+
+
+def test_unexpected_error_unlocks_and_alerts(repo, monkeypatch):
+    _patch_positive(monkeypatch)
+    monkeypatch.setattr(state_machine.checklist, "describes_addition_to_case", lambda text: False)
+
+    async def broken_escalate(deal_id, status):
+        raise RuntimeError("неожиданная ошибка")
+
+    monkeypatch.setattr(state_machine, "_escalate_with_retries", broken_escalate)
+    alerts = []
+    monkeypatch.setattr(
+        state_machine.report_webhook, "send_error_notification",
+        lambda marker, message: alerts.append((marker, message)),
+    )
+    _make_deal_awaiting_reply(repo, 83)
+
+    _handle(83, "да")  # исключение наружу не вылетает
+
+    assert repo.get_deal(83).in_progress is False
+    assert alerts and alerts[0][0] == "83" and "ответ клиента" in alerts[0][1]

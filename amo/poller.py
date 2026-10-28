@@ -10,6 +10,7 @@ from amo.client import amo_client
 from config import settings
 from core import state_machine, templates
 from db import repository as repo
+from reporting import watchdog
 from reporting import webhook as report_webhook
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,7 @@ async def poll_once() -> None:
         settings.amocrm_stage_new_contact_id,
     )
     for lead in leads:
+        watchdog.beat("amo_poll")
         deal_id = lead["id"]
         if repo.deal_exists(deal_id):
             continue
@@ -132,4 +134,5 @@ async def poll_loop() -> None:
             logger.exception("Ошибка в цикле поллинга amoCRM (HTTP %s)", status)
         except Exception:
             logger.exception("Ошибка в цикле поллинга amoCRM")
+        watchdog.beat("amo_poll")
         await asyncio.sleep(settings.amocrm_poll_interval_seconds)

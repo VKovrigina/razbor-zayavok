@@ -136,3 +136,116 @@ def test_send_raises_on_send_message_hang_instead_of_blocking_forever(monkeypatc
         asyncio.run(_send("target", "text"))
 
     assert recorded == []
+
+
+class _CacheMissClient(_FakeClient):
+    """По числовому id пользователя нет в кэше сессии (сделки 40125553, 40179275), по username —
+    находится."""
+
+    def __init__(self):
+        super().__init__()
+        self.targets = []
+        self.saved = 0
+        self.session = self
+
+    def save(self):
+        self.saved += 1
+
+    async def get_entity(self, target):
+        self.targets.append(target)
+        if isinstance(target, int):
+            raise ValueError(f"Could not find the input entity for PeerUser(user_id={target})")
+        return _FakeEntity()
+
+
+@pytest.fixture()
+def no_jitter(monkeypatch):
+    async def _no_wait(low, high):
+        return None
+
+    monkeypatch.setattr(sender, "_jitter", _no_wait)
+
+
+def test_send_reply_falls_back_to_username_when_peer_not_cached(monkeypatch, recorded, no_jitter):
+    client = _CacheMissClient()
+    monkeypatch.setattr(sender, "get_client", lambda: client)
+
+    asyncio.run(sender.send_reply(6355684250, "Здравствуйте, ваша заявка актуальна?", "toronagasama"))
+
+    assert client.targets == [6355684250, "toronagasama"]
+    assert len(client.sent) == 1
+
+
+def test_send_reply_without_username_still_raises(monkeypatch, recorded, no_jitter):
+    monkeypatch.setattr(sender, "get_client", lambda: _CacheMissClient())
+
+    with pytest.raises(TelegramSendError):
+        asyncio.run(sender.send_reply(6355684250, "текст", None))
+
+
+def test_send_reply_uses_peer_id_when_cached(monkeypatch, recorded, no_jitter):
+    client = _FakeClient()
+    targets = []
+    original = client.get_entity
+
+    async def tracking(target):
+        targets.append(target)
+        return await original(target)
+
+    client.get_entity = tracking
+    monkeypatch.setattr(sender, "get_client", lambda: client)
+
+    asyncio.run(sender.send_reply(111, "текст", "someone"))
+
+    assert targets == [111]
+
+
+def test_send_reply_other_errors_not_retried_by_username(monkeypatch, recorded, no_jitter):
+    client = _FakeClient(send_message_error=FloodWaitError(request=None, capture=30))
+    targets = []
+    original = client.get_entity
+
+    async def tracking(target):
+        targets.append(target)
+        return await original(target)
+
+    client.get_entity = tracking
+    monkeypatch.setattr(sender, "get_client", lambda: client)
+
+    with pytest.raises(TelegramSendError):
+        asyncio.run(sender.send_reply(111, "текст", "someone"))
+    assert targets == [111]
+
+
+def test_send_first_contact_saves_session_cache_immediately(monkeypatch, recorded, no_jitter):
+    client = _CacheMissClient()
+    monkeypatch.setattr(sender, "get_client", lambda: client)
+
+    asyncio.run(sender.send_first_contact("toronagasama", "Первое сообщение"))
+
+    assert client.saved == 1
+
+
+def test_send_first_contact_session_save_failure_does_not_fail_send(monkeypatch, recorded, no_jitter):
+    client = _CacheMissClient()
+
+    def broken_save():
+        raise RuntimeError("database is locked")
+
+    client.save = broken_save
+    monkeypatch.setattr(sender, "get_client", lambda: client)
+
+    assert asyncio.run(sender.send_first_contact("toronagasama", "Первое сообщение")) == 12345
+
+
+def test_resolve_peer_id_by_username_and_saves_cache(monkeypatch):
+    client = _CacheMissClient()
+    monkeypatch.setattr(sender, "get_client", lambda: client)
+    assert asyncio.run(sender.resolve_peer_id("toronagasama")) == 12345
+    assert client.targets == ["toronagasama"] and client.saved == 1
+
+
+def test_resolve_peer_id_unknown_username_raises(monkeypatch):
+    monkeypatch.setattr(sender, "get_client", lambda: _FakeClient(get_entity_error=ValueError("no user")))
+    with pytest.raises(TelegramSendError):
+        asyncio.run(sender.resolve_peer_id("nobody"))

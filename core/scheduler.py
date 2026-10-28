@@ -6,6 +6,7 @@ import logging
 from config import settings
 from core import state_machine
 from reporting import crash as report_crash
+from reporting import watchdog
 
 logger = logging.getLogger(__name__)
 
@@ -20,4 +21,5 @@ async def scheduler_loop() -> None:
             await asyncio.to_thread(report_crash.update_heartbeat)
         except Exception:
             logger.exception("Не удалось записать heartbeat")
+        watchdog.beat("scheduler")
         await asyncio.sleep(settings.scheduler_tick_seconds)

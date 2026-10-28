@@ -82,6 +82,14 @@ def test_llm_two_services_without_separator_passes(monkeypatch):
     assert checklist.assess("сеилбот битрикс", "Заявка из бота в сеилботе попадает в битрикс") == []
 
 
+def test_llm_max_tokens_fits_long_services_list(monkeypatch):
+    # Сделка 40328525: 12 сервисов в services_found съели max_tokens=150 (ответ занял 163) —
+    # describes_problem_or_data обрезался, подробное ТЗ помечалось как "не описана проблема"
+    messages = _fake_llm(monkeypatch, {"has_two_services": True, "describes_problem_or_data": True})
+    checklist.assess("сайт, Telegram, VK, Max, Google таблицы, ОК, Дзен", "Подробное ТЗ")
+    assert messages.calls[0]["max_tokens"] >= 1024
+
+
 def test_llm_one_service_flagged(monkeypatch):
     _fake_llm(monkeypatch, {"has_two_services": False, "describes_problem_or_data": True})
     assert checklist.assess("Авито", "Нужна консультация по интеграции") == ["stack"]
