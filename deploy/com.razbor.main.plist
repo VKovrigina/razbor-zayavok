@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- main.py на Mac через launchd (аналог deploy/razbor-main.service на сервере). Установка —
+     README «Mac (launchd)». PROJECT_DIR заменить на путь к проекту.
+     KeepAlive/SuccessfulExit=false: падение или сторож (выход с кодом 1) — перезапуск через
+     ThrottleInterval; штатная остановка (SIGTERM, выход 0) — не перезапускается. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.razbor.main</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>PROJECT_DIR/.venv/bin/python</string>
+        <string>main.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>PROJECT_DIR</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>PROJECT_DIR/data/main_manual_start.log</string>
+    <key>StandardErrorPath</key>
+    <string>PROJECT_DIR/data/main_manual_start.log</string>
+</dict>
+</plist>

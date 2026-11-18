@@ -157,12 +157,41 @@ async def process_new_deal(deal_id: int) -> None:
             logger.exception("Сделка %s: не удалось создать задачу на Варвару", deal_id)
         return
 
+    if not await _still_in_new_contact(deal_id):
+        return
+
     sent = await _send_first_contact(deal_id, deal, text)
     if sent is None:
         return
 
     channel, peer_id = sent
     await _finish_first_contact(deal_id, channel, peer_id, messaging_flagged)
+
+
+async def _still_in_new_contact(deal_id: int) -> bool:
+    """Перепроверка этапа прямо перед первым сообщением. Опрос amoCRM разбирает снимок списка
+    сделок по очереди (антибан-пауза до 3 мин на сделку), и при медленной сети до сделки доходит
+    через десятки минут — за это время Варвара могла её объединить, удалить или перевести дальше
+    (2026-11-12, @nat_sharova: повторное первое сообщение после согласия клиентки и взятия кейса
+    партнёром, этап «Взят партнёром» затёрт). Такую сделку бот больше не ведёт (`BLOCKED`), клиенту
+    ничего не пишет. Если amoCRM не ответил — отправляем как раньше, чтобы заявки не застревали."""
+    try:
+        status_id = await asyncio.to_thread(amo_actions.get_lead_status_id, deal_id)
+    except Exception:
+        logger.warning(
+            "Сделка %s: не удалось перепроверить этап перед первым сообщением — отправляем",
+            deal_id, exc_info=True,
+        )
+        return True
+    if status_id == settings.amocrm_stage_new_contact_id:
+        return True
+    logger.warning(
+        "Сделка %s: уже не на этапе «Новый контакт» (этап %s; None — удалена/объединена) — "
+        "первое сообщение не отправляем, бот сделку не ведёт",
+        deal_id, status_id,
+    )
+    repo.escalate(deal_id, Status.BLOCKED)
+    return False
 
 
 async def _finish_first_contact(

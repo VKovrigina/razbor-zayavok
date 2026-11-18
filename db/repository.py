@@ -501,6 +501,16 @@ def log_event(deal_id: int, direction: str, channel: str | None, text: str) -> N
         )
 
 
+def get_last_event_ts(deal_id: int) -> str | None:
+    """Время последнего события (входящего или исходящего) по сделке — граница, после которой
+    сообщения клиента ещё не обработаны (telegram_channel/catch_up.py)."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT max(ts) FROM events_log WHERE deal_id = ?", (deal_id,)
+        ).fetchone()
+        return row[0] if row else None
+
+
 def list_new_deals() -> list[Deal]:
     with _connect() as conn:
         rows = conn.execute("SELECT * FROM deals WHERE status = ?", (Status.NEW.value,)).fetchall()

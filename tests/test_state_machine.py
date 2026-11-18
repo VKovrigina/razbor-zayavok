@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from core import state_machine
 from db.models import Channel, ReplyCategory, Status
 
@@ -355,6 +357,11 @@ def _patch_first_contact_success(monkeypatch):
     monkeypatch.setattr(state_machine.checklist, "assess_topic", lambda stack_text, case_text: [])
     monkeypatch.setattr(state_machine.checklist, "mentions_messaging_work", lambda case_text: False)
     monkeypatch.setattr(state_machine.amo_actions, "move_to_negotiations", lambda deal_id: None)
+    monkeypatch.setattr(
+        state_machine.amo_actions,
+        "get_lead_status_id",
+        lambda deal_id: state_machine.settings.amocrm_stage_new_contact_id,
+    )
 
     channel_tag_calls = []
     monkeypatch.setattr(
@@ -381,6 +388,54 @@ def test_process_new_deal_happy_path_sends_and_advances(repo, monkeypatch):
     assert deal.status == Status.AWAITING_REPLY_1
     assert deal.channel == Channel.TELEGRAM
     assert channel_tag_calls == [(10, "telegram")]
+
+
+def _patch_send_recorder(monkeypatch):
+    sent = []
+
+    async def recording_send_first_contact(username, text):
+        sent.append(text)
+        return 12345
+
+    monkeypatch.setattr(state_machine.telegram_sender, "send_first_contact", recording_send_first_contact)
+    return sent
+
+
+@pytest.mark.parametrize("current_stage", ["other_stage", None])
+def test_process_new_deal_skips_when_lead_left_new_contact(repo, monkeypatch, current_stage):
+    """Сделку, пока она ждала очереди, перевели на другой этап / объединили / удалили (2026-11-12,
+    @nat_sharova: повторное первое сообщение после согласия и взятия кейса партнёром) — клиенту
+    ничего не пишем, бот сделку больше не ведёт."""
+    _patch_first_contact_success(monkeypatch)
+    sent = _patch_send_recorder(monkeypatch)
+    stage = 99999 if current_stage == "other_stage" else None
+    monkeypatch.setattr(state_machine.amo_actions, "get_lead_status_id", lambda deal_id: stage)
+    _make_new_deal(repo, 13)
+
+    _process_new_deal(13)
+
+    assert sent == []
+    deal = repo.get_deal(13)
+    assert deal.status == Status.BLOCKED
+    assert deal.next_action_at is None
+
+
+def test_process_new_deal_sends_when_stage_check_fails(repo, monkeypatch):
+    """amoCRM не ответил на проверке этапа — отправляем как раньше, чтобы заявки не застревали
+    при плохой сети."""
+    _patch_first_contact_success(monkeypatch)
+    sent = _patch_send_recorder(monkeypatch)
+
+    def failing_status(deal_id):
+        raise RuntimeError("amo timeout")
+
+    monkeypatch.setattr(state_machine.amo_actions, "get_lead_status_id", failing_status)
+    _make_new_deal(repo, 14)
+
+    _process_new_deal(14)
+
+    assert len(sent) == 1
+    assert repo.get_deal(14).status == Status.AWAITING_REPLY_1
 
 
 def test_process_new_deal_channel_tag_failure_does_not_block_deal(repo, monkeypatch):

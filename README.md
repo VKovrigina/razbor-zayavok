@@ -89,7 +89,10 @@ python main.py
 дольше 20 минут или Telegram 3 проверки подряд не отвечает — с алертом в вебхук.
 
 **Переезд — строго в таком порядке:**
-1. Остановить агента на старой машине (оба процесса) и убедиться, что не запущен
+1. Остановить агента на старой машине (оба процесса) **и отключить его автозапуск** — на Mac он
+   запущен через launchd и сам стартует при каждом входе в систему (раздел «6б» ниже):
+   `launchctl bootout gui/$(id -u)/com.razbor.main`, `launchctl bootout gui/$(id -u)/com.razbor.cases`,
+   `rm ~/Library/LaunchAgents/com.razbor.*.plist`. Убедиться, что не запущен
    (`ps aux | grep main`). Две копии на разных машинах = одна Telegram-сессия с двух мест:
    Telegram может сбросить авторизацию, клиенты получат двойные сообщения. Блокировка
    `data/*.lock` ловит второй запуск только на ОДНОЙ машине.
@@ -109,6 +112,29 @@ python main.py
    и httpx в коде приглушены до WARNING.
 5. Остановка/перезапуск — только `sudo systemctl stop|restart razbor-main` (SIGTERM = штатная
    остановка, без ложного алерта о краше).
+
+## 6б. Mac (launchd) — до переезда на сервер
+
+На Mac нет systemd, а сторож при обрыве сети завершает процесс в расчёте на перезапуск — без
+перезапуска бот просто останавливался (2026-10-29: ночной обрыв сети → 4 часа простоя). Поэтому
+на Mac оба процесса запущены через launchd (аналог systemd): `deploy/com.razbor.main.plist`,
+`deploy/com.razbor.cases.plist`. Падение или сторож (выход с кодом 1) — перезапуск через 10 с;
+штатная остановка (SIGTERM) — без перезапуска; при входе в систему стартуют сами. Логи — те же
+`data/main_manual_start.log`, `data/main_cases_manual_start.log`.
+
+```bash
+# установка (PROJECT_DIR в шаблоне → путь к проекту)
+sed "s#PROJECT_DIR#$PWD#g" deploy/com.razbor.main.plist  > ~/Library/LaunchAgents/com.razbor.main.plist
+sed "s#PROJECT_DIR#$PWD#g" deploy/com.razbor.cases.plist > ~/Library/LaunchAgents/com.razbor.cases.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.razbor.main.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.razbor.cases.plist
+
+launchctl kickstart -k gui/$(id -u)/com.razbor.main   # перезапуск (после изменений кода)
+launchctl list | grep razbor                          # статус: PID и код последнего выхода
+launchctl bootout gui/$(id -u)/com.razbor.main        # остановить и отключить
+```
+
+Пока Mac спит, бот не работает в любом случае — для круглосуточной работы нужен сервер.
 
 ## 7. Проверка сценария
 
